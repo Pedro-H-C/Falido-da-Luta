@@ -4,8 +4,9 @@ class Fighter():
     def __init__(self, x, y):
         self.rect = pygame.Rect((x, y, 50, 150))  # Define the rectangle for the fighter
         self.vel_y = 0
-    def move(self, screen_width):
+    def move(self, screen_width, screen_height):
         SPEED = 10
+        GRAVITY = 2
         dx = 0 
         dy = 0
 
@@ -16,8 +17,9 @@ class Fighter():
         if key[pygame.K_d]:
             dx = SPEED
 
-        if key[pygame.K_w] and self.vel_y == 0:
+        if key[pygame.K_w] and self.vel_y == 0:  # Jump only if on the ground
             self.vel_y = -30  # Jumping velocity
+        self.vel_y += GRAVITY
         dy+=self.vel_y
 
     
@@ -27,6 +29,10 @@ class Fighter():
             dx = -self.rect.left
         if self.rect.right + dx>screen_width:
             dx = screen_width - self.rect.right
+        if self.rect.bottom + dy>screen_height - 110:
+            self.vel_y = 0
+            dy = screen_height - 110 - self.rect.bottom
+
 
         self.rect.x += dx
         self.rect.y += dy

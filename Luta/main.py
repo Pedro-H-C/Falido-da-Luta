@@ -28,8 +28,8 @@ run = True
 while run:
     draw_bg(bg_image)
 
-    fighter_1.move(SCREEN_WIDTH)
-    #fighter_2.move(SCREEN_WIDTH)
+    fighter_1.move(SCREEN_WIDTH, SCREEN_HEIGHT)
+    #fighter_2.move(SCREEN_WIDTH, SCREEN_HEIGHT)
 
     fighter_1.draw(screen)
     fighter_2.draw(screen)
