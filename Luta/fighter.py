@@ -4,24 +4,36 @@ class Fighter():
     def __init__(self, x, y):
         self.rect = pygame.Rect((x, y, 50, 150))  # Define the rectangle for the fighter
         self.vel_y = 0
-    def move(self, screen_width, screen_height):
+        self.jumping = False
+        self.attacking = False
+        self.attack_type = 0  # 0: no attack, 1: attack type 1, 2: attack type 2
+    def move(self, screen_width, screen_height, surface, target):
         SPEED = 10
         GRAVITY = 2
         dx = 0 
         dy = 0
 
-        #MOVIMENTOS
-        key = pygame.key.get_pressed()
-        if key[pygame.K_a]:
-            dx = -SPEED
-        if key[pygame.K_d]:
-            dx = SPEED
+        if not self.attacking:
+            #MOVIMENTOS
+            key = pygame.key.get_pressed()
+            if key[pygame.K_a]:
+                dx = -SPEED
+            if key[pygame.K_d]:
+                dx = SPEED
 
-        if key[pygame.K_w] and self.vel_y == 0:  # Jump only if on the ground
-            self.vel_y = -30  # Jumping velocity
-        self.vel_y += GRAVITY
-        dy+=self.vel_y
+            if key[pygame.K_w] and self.jumping == False:  # Jump only if on the ground
+                self.vel_y = -30  # Jumping velocity
+                self.jumping = True
+            self.vel_y += GRAVITY
+            dy+=self.vel_y
 
+            #ATAQUES
+            if key[pygame.K_r] or key[pygame.K_t]:
+                self.attack(surface, target)  # Call the attack method when R or T is pressed
+                if key[pygame.K_r]:
+                    self.attack_type = 1
+                if key[pygame.K_t]:
+                    self.attack_type = 2
     
 
         #COLISOES
@@ -32,10 +44,20 @@ class Fighter():
         if self.rect.bottom + dy>screen_height - 110:
             self.vel_y = 0
             dy = screen_height - 110 - self.rect.bottom
+            self.jumping = False  # Reset jumping when on the ground
 
 
         self.rect.x += dx
         self.rect.y += dy
+
+    def attack(self, surface, target):
+        
+        attacking_rect = pygame.Rect(self.rect.centerx, self.rect.y,2 * self.rect.width, self.rect.height)
+        if attacking_rect.colliderect(target.rect):
+            print("Ataque bem sucedido!")
+        pygame.draw.rect(surface, (0, 255, 0), attacking_rect)  # Draw the attack area as a green rectangle
+
+
 
     def draw(self, surface):
         pygame.draw.rect(surface, (255, 0, 0), self.rect)  # Draw the fighter as a red rectangle
