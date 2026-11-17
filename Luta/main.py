@@ -17,7 +17,9 @@ WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
 MACEDO_SIZE = 250
-MACEDO_DATA = [MACEDO_SIZE]
+MACEDO_SCALE = 3
+MACEDO_OFFSET = [360, 350]
+MACEDO_DATA = [MACEDO_SIZE, MACEDO_SCALE, MACEDO_OFFSET]
 
 
 bg_image = pygame.image.load("assets/images/Backgrounds/bgArrudinha.png").convert_alpha()
@@ -39,8 +41,8 @@ def draw_health_bar(health, x, y):
 
 
 #CRIAR OS LUTADORES
-fighter_1 = Fighter(200, 310, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
-fighter_2 = Fighter(700, 310, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
+fighter_1 = Fighter(200, 310, False, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
+fighter_2 = Fighter(700, 310, True, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
 
 
 
@@ -51,8 +53,12 @@ while run:
     draw_health_bar(fighter_1.health, 20, 20)
     draw_health_bar(fighter_2.health, 580, 20)
 
+
     fighter_1.move(SCREEN_WIDTH, SCREEN_HEIGHT, screen, fighter_2)
     #fighter_2.move(SCREEN_WIDTH, SCREEN_HEIGHT, screen, fighter_1)
+
+    fighter_1.update()
+    fighter_2.update()
 
     fighter_1.draw(screen)
     fighter_2.draw(screen)
