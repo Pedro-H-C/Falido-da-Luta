@@ -16,12 +16,14 @@ RED = (255, 0, 0)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
+MACEDO_SIZE = 250
+MACEDO_DATA = [MACEDO_SIZE]
 
 
-bg_image = pygame.image.load("assets/images/bgArrudinha.png").convert_alpha()
+bg_image = pygame.image.load("assets/images/Backgrounds/bgArrudinha.png").convert_alpha()
 
-
-
+macedo_sheet = pygame.image.load("assets/images/Sprites/macedo.png").convert_alpha()
+MACEDO_ANIMATION_STEPS = [8, 6, 4, 10, 10, 8]  # Number of frames for each animation
 
 
 def draw_bg(imagem):
@@ -37,8 +39,8 @@ def draw_health_bar(health, x, y):
 
 
 #CRIAR OS LUTADORES
-fighter_1 = Fighter(200, 310)
-fighter_2 = Fighter(700, 310)
+fighter_1 = Fighter(200, 310, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
+fighter_2 = Fighter(700, 310, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
 
 
 
