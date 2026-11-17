@@ -2,11 +2,13 @@ import pygame
 
 class Fighter():
     def __init__(self, x, y):
+        self.flip = False
         self.rect = pygame.Rect((x, y, 50, 150))  # Define the rectangle for the fighter
         self.vel_y = 0
         self.jumping = False
         self.attacking = False
         self.attack_type = 0  # 0: no attack, 1: attack type 1, 2: attack type 2
+        self.health = 100
     def move(self, screen_width, screen_height, surface, target):
         SPEED = 10
         GRAVITY = 2
@@ -45,16 +47,22 @@ class Fighter():
             self.vel_y = 0
             dy = screen_height - 110 - self.rect.bottom
             self.jumping = False  # Reset jumping when on the ground
+        
+
+        if target.rect.centerx > self.rect.centerx:
+            self.flip = False
+        else:
+            self.flip = True
 
 
         self.rect.x += dx
         self.rect.y += dy
 
     def attack(self, surface, target):
-        
-        attacking_rect = pygame.Rect(self.rect.centerx, self.rect.y,2 * self.rect.width, self.rect.height)
+        self.attacking = True 
+        attacking_rect = pygame.Rect(self.rect.centerx - (2 * self.rect.width * self.flip), self.rect.y,2 * self.rect.width, self.rect.height)
         if attacking_rect.colliderect(target.rect):
-            print("Ataque bem sucedido!")
+            target.health -= 10
         pygame.draw.rect(surface, (0, 255, 0), attacking_rect)  # Draw the attack area as a green rectangle
 
 
