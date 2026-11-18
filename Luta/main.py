@@ -1,4 +1,5 @@
 import pygame
+import fighter as fighter_module
 from fighter import Fighter
 
 pygame.init()
@@ -153,8 +154,8 @@ while run:
 
 
         if intro_count <= 0:
-            fighter_1.move(SCREEN_WIDTH, SCREEN_HEIGHT, screen, fighter_2)
-            fighter_2.move(SCREEN_WIDTH, SCREEN_HEIGHT, screen, fighter_1)
+            fighter_1.move(SCREEN_WIDTH, SCREEN_HEIGHT, screen, fighter_2, not round_over)
+            fighter_2.move(SCREEN_WIDTH, SCREEN_HEIGHT, screen, fighter_1, not round_over)
         else:
             draw_text(str(intro_count), count_font, RED, SCREEN_WIDTH/2 - 40, SCREEN_HEIGHT/2 - 100)
             if pygame.time.get_ticks() - last_cout_update >= 1000:
@@ -169,27 +170,28 @@ while run:
         fighter_1.draw(screen)
         fighter_2.draw(screen)
 
-        '''
-        if round_over == False:
-            if fighter_1.alive == False:
+        # FIM DE ROUND
+        if not round_over:
+            if not fighter_1.alive:
                 score[1] += 1
+                winner_text = "P2 VENCEU!"
                 round_over = True
                 round_over_time = pygame.time.get_ticks()
-                print(score)
-            elif fighter_2.alive == False:
+            elif not fighter_2.alive:
                 score[0] += 1
+                winner_text = "P1 VENCEU!"
                 round_over = True
                 round_over_time = pygame.time.get_ticks()
-                print(score)
         else:
-            screen.blit(victory_img,(360, 150))
-            if pygame.time.get_ticks() - round_over_time >  ROUND_OVER_COOLDOWN:
+            img = title_font.render(winner_text, True, YELLOW)
+            screen.blit(img, img.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 50)))
+            if pygame.time.get_ticks() - round_over_time > ROUND_OVER_COOLDOWN:
+                # novo round: reseta lutadores mas mantém o placar
                 round_over = False
                 intro_count = 3
-                fighter_1 = Fighter(200, 310, 1, False, IGOR_DATA, igor_sheet, IGOR_ANIMATION_STEPS)
-                fighter_2 = Fighter(700, 310, 2, True, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
-
-                '''
+                last_cout_update = pygame.time.get_ticks()
+                fighter_1 = Fighter(200, 200, 1, False, IGOR_DATA, igor_sheet, IGOR_ANIMATION_STEPS)
+                fighter_2 = Fighter(700, 200, 2, True, MACEDO_DATA, macedo_sheet, MACEDO_ANIMATION_STEPS)
 
 
 
@@ -198,6 +200,8 @@ while run:
                 run=False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 menu = True  # ESC volta para o menu
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_F1:
+                fighter_module.DEBUG = not fighter_module.DEBUG  # mostra hitboxes
 
         relogio.tick(FPS)  # Limit the frame rate to 60 FPS
         pygame.display.flip()
