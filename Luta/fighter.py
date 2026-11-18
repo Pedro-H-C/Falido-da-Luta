@@ -12,7 +12,7 @@ class Fighter():
         self.frame_index = 0
         self.image = self.animation_list[self.action][self.frame_index]
         self.update_time = pygame.time.get_ticks()
-        self.rect = pygame.Rect((x, y, 50, 150))  # Define the rectangle for the fighter
+        self.rect = pygame.Rect((x, y, 100, 300))  # Define the rectangle for the fighter
         self.vel_y = 0
         self.running = False
         self.jumping = False
@@ -39,7 +39,7 @@ class Fighter():
         dy = 0
         self.running = False
         key = pygame.key.get_pressed()
-        if self.attacking == False and self.alive == True:
+        if self.attacking == False and target.attacking == False and self.alive == True:
             #MOVIMENTOS
 
             if self.player == 1: 
@@ -58,8 +58,6 @@ class Fighter():
 
                 #ATAQUES
                 if key[pygame.K_r] or key[pygame.K_t]:
-                    print(surface)
-                    print(target)
                     if key[pygame.K_r]:
                         self.attack_type = 1
                     if key[pygame.K_t]:
@@ -80,12 +78,10 @@ class Fighter():
                 dy+=self.vel_y
 
                 #ATAQUES
-                if key[pygame.K_r] or key[pygame.K_t]:
-                    print(surface)
-                    print(target)
-                    if key[pygame.K_r]:
+                if key[pygame.K_n] or key[pygame.K_m]:
+                    if key[pygame.K_n]:
                         self.attack_type = 1
-                    if key[pygame.K_t]:
+                    if key[pygame.K_m]:
                         self.attack_type = 2
                     self.attack(surface, target)  # Call the attack method when R or T is pressed
 
@@ -168,7 +164,7 @@ class Fighter():
             if attacking_rect.colliderect(target.rect):
                 target.health -= 10
                 target.hit = True
-            #pygame.draw.rect(surface, (0, 255, 0), attacking_rect)  # Draw the attack area as a green rectangle
+            pygame.draw.rect(surface, (0, 255, 0), attacking_rect)  # Draw the attack area as a green rectangle
 
 
 
