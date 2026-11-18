@@ -1,7 +1,7 @@
 import pygame
 
 class Fighter():
-    def __init__(self, x, y, flip, data, sprite_sheet, animation_steps, player):
+    def __init__(self, x, y, player, flip, data, sprite_sheet, animation_steps):
         self.player = player
         self.size = data[0]
         self.image_scale = data[1]
@@ -39,7 +39,7 @@ class Fighter():
         dy = 0
         self.running = False
         key = pygame.key.get_pressed()
-        if self.attacking == False:
+        if self.attacking == False and self.alive == True:
             #MOVIMENTOS
 
             if self.player == 1: 
@@ -168,7 +168,7 @@ class Fighter():
             if attacking_rect.colliderect(target.rect):
                 target.health -= 10
                 target.hit = True
-            pygame.draw.rect(surface, (0, 255, 0), attacking_rect)  # Draw the attack area as a green rectangle
+            #pygame.draw.rect(surface, (0, 255, 0), attacking_rect)  # Draw the attack area as a green rectangle
 
 
 
