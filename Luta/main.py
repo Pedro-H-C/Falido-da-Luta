@@ -5,8 +5,8 @@ import unicodedata
 import pygame
 
 import fighter as fighter_module
-from fighter import (CHARACTERS, CHARACTERS_BY_ID, DIFFICULTIES, DIFFICULTY_LABELS, GROUND_MARGIN,
-                     Fighter, apply_alt_palette, get_frames, preload_characters)
+from fighter import (CHARACTERS, CHARACTERS_BY_ID, DASH_COST, DIFFICULTIES, DIFFICULTY_LABELS, GROUND_MARGIN,
+                     SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_frames, get_super_fx, preload_characters)
 
 pygame.init()
 
@@ -51,14 +51,26 @@ FIGHT_BANNER_MS = 800        # tempo do "LUTEM!" na tela
 READY_FLASH_MS = 900         # tempo do "PRONTO!" antes da luta começar
 
 # SENSAÇÃO DOS GOLPES
-HITSTOP_FRAMES = {1: 3, 2: 5}        # congelamento ao acertar (golpe rápido / forte)
-BLOCK_HITSTOP_FRAMES = {1: 2, 2: 3}
+HITSTOP_FRAMES = {1: 3, 2: 5, SUPER: 12}   # congelamento ao acertar (rápido / forte / SUPER)
+PARRY_HITSTOP_FRAMES = 12
+LAUNCH_HITSTOP_FRAMES = 6            # lançamento do SUPER aéreo
 KO_HITSTOP_FRAMES = 16
+SUPER_FREEZE_FRAMES = 36             # o jogo congela com a tela escura quando alguém solta o SUPER
+SUPER_DIM_ALPHA = 200
 SLOWMO_FRAMES = 70                   # duração da câmera lenta do nocaute (frames reais)
 SLOWMO_SCALE = 0.35                  # o jogo anda a 35% da velocidade
 SHAKE_MARGIN = 12                    # sobra do fundo para o tremor não mostrar bordas
 HIT_COLORS = ((255, 255, 255), (255, 240, 120), (255, 200, 40), (255, 140, 20))
-BLOCK_COLORS = ((255, 255, 255), (170, 220, 255), (90, 170, 255))
+PARRY_COLORS = ((255, 255, 255), (170, 220, 255), (90, 170, 255))
+PARRY_TEXT_COLOR = (140, 210, 255)
+
+# HUD
+STAMINA_COLOR = (70, 210, 110)
+STAMINA_LOW_COLOR = (230, 140, 40)   # abaixo do custo do dash
+SUPER_COLOR = (255, 150, 20)
+SUPER_FULL_COLOR = (255, 245, 150)
+SUPER_BAR_W = 280
+SUPER_KEYS = ("Y", "Vírgula")        # tecla do SUPER de cada jogador (mostrada na barra)
 
 # TELA DE SELEÇÃO
 SELECT_PANEL_X = (30, 530)
@@ -70,10 +82,10 @@ PREVIEW_FRAME_MS = 120
 STAT_BAR_W = 150
 # (rótulo, atributo, menor valor, maior valor) — o pulo usa o módulo da velocidade
 STAT_BARS = (
-    ("Vida", "max_health", 95, 110),
-    ("Velocidade", "speed", 7, 9),
-    ("Pulo", "jump_vel", 28, 32),
-    ("Força", "dmg_mult", 0.9, 1.15),
+    ("Vida", "max_health", 90, 115),
+    ("Velocidade", "speed", 6, 9),
+    ("Pulo", "jump_vel", 25, 32),
+    ("Força", "dmg_mult", 0.9, 1.25),
 )
 
 # Redimensiona as imagens de fundo UMA vez (não a cada frame).
@@ -90,6 +102,9 @@ pause_overlay.fill((0, 0, 0, 160))
 # Clarão do nocaute (a transparência muda a cada frame)
 flash_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
 flash_overlay.fill(WHITE)
+# Tela escura do SUPER (fica atrás dos lutadores)
+dim_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+dim_overlay.fill((12, 6, 24))
 # Faixa escura atrás dos letreiros grandes (NOCAUTE!, PRONTO!)
 banner_band = pygame.Surface((SCREEN_WIDTH, 200), pygame.SRCALPHA)
 banner_band.fill((0, 0, 0, 130))
@@ -126,10 +141,20 @@ def build_previews():
 
     Chave: (id, lado, paleta alternativa). O lado direito vem espelhado, olhando para o P1.
     """
+    # Todos usam a mesma proporção da luta (tomando o primeiro personagem como referência),
+    # alinhados pelo offset: assim um lutador mais alto também aparece mais alto na seleção.
+    ref_size, ref_scale, ref_offset = CHARACTERS[0]["data"]
+    k = PREVIEW_SIZE / int(ref_size * ref_scale)
     previews = {}
     for char in CHARACTERS:
-        idle = [pygame.transform.smoothscale(frame, (PREVIEW_SIZE, PREVIEW_SIZE))
-                for frame in get_frames(char["id"])[0]]
+        offset = char["data"][2]
+        pos = ((ref_offset[0] - offset[0]) * k, (ref_offset[1] - offset[1]) * k)
+        idle = []
+        for frame in get_frames(char["id"])[0]:
+            size = round(frame.get_width() * k)
+            canvas = pygame.Surface((PREVIEW_SIZE, PREVIEW_SIZE), pygame.SRCALPHA)
+            canvas.blit(pygame.transform.smoothscale(frame, (size, size)), pos)
+            idle.append(canvas)
         mirrored = [pygame.transform.flip(frame, True, False) for frame in idle]
         previews[(char["id"], 0, False)] = idle
         previews[(char["id"], 1, False)] = mirrored
@@ -304,6 +329,51 @@ def draw_health_bar(fighter, x, y, mirrored=False):
     pygame.draw.rect(screen, YELLOW, segment(fighter.health / fighter.max_health))
 
 
+def draw_stamina_bar(fighter, x, y, mirrored=False):
+    """Barra fina de estamina embaixo da vida; o tamanho mostra a estamina máxima do personagem.
+    O risco branco marca o custo do dash."""
+    width, height = int(2.6 * fighter.max_stamina), 8
+    if mirrored:
+        x = x + 400 - width
+    pygame.draw.rect(screen, BLACK, (x - 2, y - 2, width + 4, height + 4))
+    pygame.draw.rect(screen, DARK_GRAY, (x, y, width, height))
+    fill = int(width * fighter.stamina / fighter.max_stamina)
+    color = STAMINA_COLOR if fighter.stamina >= DASH_COST else STAMINA_LOW_COLOR
+    pygame.draw.rect(screen, color, (x + width - fill if mirrored else x, y, fill, height))
+    mark = int(width * DASH_COST / fighter.max_stamina)
+    mark_x = x + width - mark if mirrored else x + mark
+    pygame.draw.line(screen, WHITE, (mark_x, y), (mark_x, y + height - 1))
+
+
+def draw_super_bar(fighter, side, key_label):
+    """Barra de SUPER no canto de baixo; cheia, ela pulsa e mostra a tecla."""
+    now = pygame.time.get_ticks()
+    width, height, y = SUPER_BAR_W, 16, 562
+    x = 20 if side == 0 else SCREEN_WIDTH - 20 - width
+    full = fighter.super_meter >= SUPER_MAX
+    pygame.draw.rect(screen, BLACK, (x - 3, y - 3, width + 6, height + 6), border_radius=6)
+    pygame.draw.rect(screen, DARK_GRAY, (x, y, width, height), border_radius=4)
+    fill = int(width * fighter.super_meter / SUPER_MAX)
+    if full:
+        pulse = (math.sin(now / 90) + 1) / 2
+        color = tuple(int(a + (b - a) * pulse) for a, b in zip(SUPER_COLOR, SUPER_FULL_COLOR))
+    else:
+        color = SUPER_COLOR
+    if fill > 0:
+        pygame.draw.rect(screen, color, (x + width - fill if side == 1 else x, y, fill, height), border_radius=4)
+    for i in range(1, 4):  # divisões em quartos
+        div_x = x + width * i // 4
+        pygame.draw.line(screen, BLACK, (div_x, y), (div_x, y + height - 1), 2)
+
+    anchor, label_x = ("bottomleft", x) if side == 0 else ("bottomright", x + width)
+    if full:
+        label = "SUPER PRONTO!" + (f" [{key_label}]" if key_label else "")
+        label_color = YELLOW if (now // 250) % 2 == 0 else WHITE
+    else:
+        label, label_color = "SUPER", LIGHT_GRAY
+    draw_text(label, tiny_font, label_color, label_x, y - 4, anchor, shadow=True)
+
+
 # ---------------- EFEITOS ----------------
 class Spark:
     """Faísca de impacto: um risco que voa, cai e afina até sumir."""
@@ -329,6 +399,27 @@ class Impact:
         self.life = self.max_life = life
 
 
+class Popup:
+    """Texto que sobe e some (PARRY!, SUPER!)."""
+    __slots__ = ("image", "x", "y", "life", "max_life")
+
+    def __init__(self, image, x, y, life=40):
+        self.image = image
+        self.x, self.y = x, y
+        self.life = self.max_life = life
+
+
+class SpriteAnim:
+    """Animação de sprite solta no cenário (onda do SUPER). x, y = canto de cima à esquerda."""
+    __slots__ = ("frames", "x", "y", "ticks", "age")
+
+    def __init__(self, frames, x, y, ticks):
+        self.frames = frames
+        self.x, self.y = x, y
+        self.ticks = ticks  # frames reais por imagem
+        self.age = 0
+
+
 def star_points(cx, cy, outer, inner, points, angle):
     pts = []
     for i in range(points * 2):
@@ -347,28 +438,59 @@ class Effects:
     def reset(self):
         self.sparks = []
         self.impacts = []
+        self.popups = []
+        self.anims = []
         self.hitstop = 0        # frames com o jogo congelado
         self.slowmo = 0         # frames restantes de câmera lenta
         self.slow_acc = 0.0
         self.flash = 0          # transparência do clarão branco
+        self.dim = 0            # transparência da tela escura do SUPER
+        self.dim_hold = 0
         self.shake_power = 0
         self.shake_frames = 0
         self.shake_total = 1
 
+    def popup(self, text, color, x, y, font=score_font):
+        img = render_text(text, font, color)
+        surf = pygame.Surface((img.get_width() + 3, img.get_height() + 3), pygame.SRCALPHA)
+        surf.blit(render_text(text, font, BLACK), (3, 3))
+        surf.blit(img, (0, 0))
+        self.popups.append(Popup(surf, x, y))
+
+    @staticmethod
+    def palette(color):
+        """Cores das faíscas a partir da cor do SUPER: branco, clarinho e a cor."""
+        if color is None:
+            return HIT_COLORS
+        light = tuple(min(255, c + (255 - c) // 2) for c in color)
+        return (WHITE, light, color)
+
     def on_hit(self, event):
         x, y = event.pos
-        heavy = event.attack_type == 2
-        if event.kind == "block":
-            self.hitstop = max(self.hitstop, BLOCK_HITSTOP_FRAMES[event.attack_type])
-            # na defesa, as faíscas voltam na direção de quem atacou
-            self._burst(x, y, -event.direction, BLOCK_COLORS, 10 + 6 * heavy, (3, 8), 1.2)
-            self.impacts.append(Impact(x, y, 30 + 12 * heavy, (150, 200, 255), star=False))
-            self._shake(2 + heavy, 6)
+        if event.kind == "parry":
+            self.hitstop = max(self.hitstop, PARRY_HITSTOP_FRAMES)
+            # as faíscas voltam na direção de quem atacou
+            self._burst(x, y, -event.direction, PARRY_COLORS, 24, (4, 12), 1.4)
+            self.impacts.append(Impact(x, y, 70, (150, 210, 255), star=False, life=16))
+            self.impacts.append(Impact(x, y, 36, WHITE, star=False, life=10))
+            self._shake(4, 8)
+            self.popup("PARRY!", PARRY_TEXT_COLOR, x, y - 50)
+            return
+        if event.kind == "launch":
+            # explosão no chão que joga os dois para cima
+            self.hitstop = max(self.hitstop, LAUNCH_HITSTOP_FRAMES)
+            self._burst(x, y, event.direction, self.palette(event.color), 30, (6, 16), 0.6, angle=-math.pi / 2)
+            self.impacts.append(Impact(x, y, 90, event.color, star=False, life=16))
+            self.impacts.append(Impact(x, y, 50, WHITE, star=False, life=10))
+            self._shake(6, 12)
         else:
+            heavy = event.attack_type >= 2
+            is_super = event.attack_type == SUPER
             self.hitstop = max(self.hitstop, HITSTOP_FRAMES[event.attack_type])
-            self._burst(x, y, event.direction, HIT_COLORS, 16 + 12 * heavy, (4, 11 + 5 * heavy), 0.9)
-            self.impacts.append(Impact(x, y, 46 + 24 * heavy, WHITE, star=True))
-            self._shake(3 + 3 * heavy, 8 + 6 * heavy)
+            self._burst(x, y, event.direction, self.palette(event.color), 16 + 12 * heavy + 20 * is_super,
+                        (4, 11 + 5 * heavy + 6 * is_super), 0.9 + 0.6 * is_super)
+            self.impacts.append(Impact(x, y, 46 + 24 * heavy + 40 * is_super, WHITE, star=True))
+            self._shake(3 + 3 * heavy + 5 * is_super, 8 + 6 * heavy + 10 * is_super)
         if event.ko:
             self.hitstop = KO_HITSTOP_FRAMES
             self.slowmo = SLOWMO_FRAMES
@@ -378,8 +500,57 @@ class Effects:
             self.impacts.append(Impact(x, y, 120, YELLOW, star=True, life=18))
             self._shake(10, 28)
 
-    def _burst(self, x, y, direction, colors, count, speed, spread):
-        base = 0.0 if direction > 0 else math.pi
+    def on_super_start(self, fighter):
+        """Congela o jogo com a tela escura enquanto o lutador junta energia."""
+        self.hitstop = max(self.hitstop, SUPER_FREEZE_FRAMES)
+        self.dim = SUPER_DIM_ALPHA
+        self.dim_hold = SUPER_FREEZE_FRAMES
+        cx, cy = fighter.rect.centerx, fighter.rect.centery
+        self.impacts.append(Impact(cx, cy, 190, fighter.super_color, star=False, life=24))
+        self.impacts.append(Impact(cx, cy, 120, WHITE, star=False, life=16))
+        self._burst(cx, cy, 1, self.palette(fighter.super_color), 18, (3, 9), math.pi)
+        self.popup("SUPER!", YELLOW, cx, fighter.rect.y - 60, menu_font)
+        self._shake(3, 10)
+
+    def on_super_impact(self, fighter):
+        """Frame de impacto do SUPER: onda de choque (sprite do personagem ou genérica)."""
+        direction = -1 if fighter.flip else 1
+        ground = fighter.rect.bottom
+        frames = get_super_fx(fighter.character["id"])
+        if frames:
+            fx = fighter.super_data["fx"]
+            width = fx["size"][0]
+            front, rise = fx["origin"]
+            x = fighter.rect.centerx + direction * front
+            if direction < 0:
+                frames = [pygame.transform.flip(frame, True, False) for frame in frames]
+                x -= width
+            self.anims.append(SpriteAnim(frames, x, ground + rise - fx["ground"], fx["frame_ticks"]))
+        elif fighter.super_data:
+            # sprite próprio sem efeito separado (a aura já está no desenho): estouro no punho
+            px, py = fighter.rect.centerx + direction * 70, fighter.rect.y + 20
+            self.impacts.append(Impact(px, py, 120, fighter.super_color, star=False, life=18))
+            self._burst(px, py, direction, self.palette(fighter.super_color), 24, (5, 14), 0.7,
+                        angle=-math.pi / 2 + direction * 0.5)
+        else:
+            # SUPER genérico: explosões douradas correndo pelo chão até o alcance do golpe
+            reach = fighter.attack_reach(SUPER)
+            for i in range(5):
+                px = fighter.rect.centerx + direction * (40 + i * reach // 5)
+                self.impacts.append(Impact(px, ground - 30, 50 + i * 10, (255, 200, 60), star=True, life=12 + i * 3))
+                self._burst(px, ground - 20, direction, HIT_COLORS, 6, (3, 9), 1.2)
+        self._shake(6, 16)
+
+    def on_land(self, fighter):
+        """Quem foi lançado pelo SUPER aéreo bate no chão."""
+        x, y = fighter.rect.centerx, fighter.rect.bottom - 6
+        for direction in (-1, 1):
+            self._burst(x, y, direction, ((210, 200, 180), (170, 160, 140), WHITE), 8, (2, 7), 0.4)
+        self._shake(5, 10)
+
+    def _burst(self, x, y, direction, colors, count, speed, spread, angle=None):
+        """Faíscas saindo de (x, y): para o lado da direção, ou no ângulo dado (radianos)."""
+        base = angle if angle is not None else (0.0 if direction > 0 else math.pi)
         for _ in range(count):
             angle = base + random.uniform(-spread, spread)
             velocity = random.uniform(*speed)
@@ -403,9 +574,20 @@ class Effects:
         for impact in self.impacts:
             impact.life -= 1
         self.impacts = [i for i in self.impacts if i.life > 0]
+        for popup in self.popups:
+            popup.y -= 1.2
+            popup.life -= 1
+        self.popups = [p for p in self.popups if p.life > 0]
+        for anim in self.anims:
+            anim.age += 1
+        self.anims = [a for a in self.anims if a.age < len(a.frames) * a.ticks]
         if self.shake_frames > 0:
             self.shake_frames -= 1
         self.flash = max(0, self.flash - 12)
+        if self.dim_hold > 0:
+            self.dim_hold -= 1
+        else:
+            self.dim = max(0, self.dim - 10)
 
     def shake_offset(self):
         if self.shake_frames <= 0:
@@ -415,6 +597,8 @@ class Effects:
 
     def draw(self, offset):
         ox, oy = offset
+        for anim in self.anims:
+            screen.blit(anim.frames[anim.age // anim.ticks], (anim.x + ox, anim.y + oy))
         for impact in self.impacts:
             t = 1 - impact.life / impact.max_life  # 0 -> 1
             cx, cy = impact.x + ox, impact.y + oy
@@ -428,6 +612,14 @@ class Effects:
             width = max(1, round(s.width * s.life / s.max_life))
             tail = (s.x - s.vx * 1.8 + ox, s.y - s.vy * 1.8 + oy)
             pygame.draw.line(screen, s.color, tail, (s.x + ox, s.y + oy), width)
+        for popup in self.popups:
+            popup.image.set_alpha(min(255, popup.life * 20))
+            screen.blit(popup.image, popup.image.get_rect(center=(popup.x + ox, popup.y + oy)))
+
+    def draw_dim(self):
+        if self.dim > 0:
+            dim_overlay.set_alpha(self.dim)
+            screen.blit(dim_overlay, (0, 0))
 
     def draw_flash(self):
         if self.flash > 0:
@@ -447,6 +639,7 @@ class Match:
         self.tags = ("P1", "CPU" if mode == MODE_CPU else "P2")
         self.colors = (P1_COLOR, CPU_COLOR if mode == MODE_CPU else P2_COLOR)
         self.score = [0, 0]
+        self.super_carry = [0, 0]   # a barra de SUPER passa de um round para o outro
         self.round_number = 0
         self.effects = Effects()
         self.finished = False
@@ -462,6 +655,8 @@ class Match:
             Fighter(700, 200, 2, True, p2_char, is_cpu=self.mode == MODE_CPU,
                     cpu_diff=self.cpu_diff, alt_palette=self.mirror),
         )
+        for f, meter in zip(self.fighters, self.super_carry):
+            f.super_meter = meter
         self.intro_count = 3
         self.last_count_update = pygame.time.get_ticks()
         self.fight_banner_until = 0
@@ -514,6 +709,13 @@ class Match:
             event = attacker.move(SCREEN_WIDTH, SCREEN_HEIGHT, defender, can_act)
             if event:
                 self.effects.on_hit(event)
+            for signal in attacker.pop_signals():
+                if signal == "super_start":
+                    self.effects.on_super_start(attacker)
+                elif signal == "super_impact":
+                    self.effects.on_super_impact(attacker)
+                elif signal == "land":
+                    self.effects.on_land(attacker)
         f1.update()
         f2.update()
 
@@ -523,6 +725,7 @@ class Match:
             if not f1.alive or not f2.alive:
                 self.round_winner = 0 if f1.alive else 1
                 self.score[self.round_winner] += 1
+                self.super_carry = [f1.super_meter, f2.super_meter]
                 self.round_over = True
                 self.round_over_time = now
         elif now - self.round_over_time > ROUND_OVER_COOLDOWN:
@@ -537,14 +740,14 @@ class Match:
         offset = self.effects.shake_offset()
         ox, oy = offset
         screen.blit(bg_image, (-SHAKE_MARGIN + ox, -SHAKE_MARGIN + oy))
+        self.effects.draw_dim()
 
         ground = SCREEN_HEIGHT - GROUND_MARGIN
         for f in self.fighters:
             height = ground - f.rect.bottom
             scale = max(0.45, 1 - height / 320)
             shadow = pygame.transform.smoothscale(shadow_image, (int(150 * scale), int(34 * scale)))
-            center_x = f.rect.x - f.offset[0] + f.image.get_width() // 2
-            screen.blit(shadow, shadow.get_rect(center=(center_x + ox, ground - 17 + oy)))
+            screen.blit(shadow, shadow.get_rect(center=(f.visual_center_x() + ox, ground - 17 + oy)))
 
         # quem está atacando fica na frente
         for f in sorted(self.fighters, key=lambda fighter: fighter.attacking):
@@ -560,20 +763,24 @@ class Match:
         for side, f in enumerate(self.fighters):
             bar_x = 20 if side == 0 else 580
             draw_health_bar(f, bar_x, 20, mirrored=side == 1)
+            draw_stamina_bar(f, bar_x, 58, mirrored=side == 1)
             name = f.name.upper()
             if side == 0:
-                badge = draw_badge(self.tags[0], self.colors[0], 20, 58)
+                badge = draw_badge(self.tags[0], self.colors[0], 20, 74)
                 draw_text(name, score_font, WHITE, badge.right + 10, badge.centery, "midleft", shadow=True)
             else:
-                badge = draw_badge(self.tags[1], self.colors[1], SCREEN_WIDTH - 20, 58, "topright")
+                badge = draw_badge(self.tags[1], self.colors[1], SCREEN_WIDTH - 20, 74, "topright")
                 draw_text(name, score_font, WHITE, badge.left - 10, badge.centery, "midright", shadow=True)
             # bolinhas de rounds vencidos, perto do centro
             for i in range(ROUNDS_TO_WIN):
                 cx = 420 - 12 - i * 28 if side == 0 else 580 + 12 + i * 28
-                pygame.draw.circle(screen, BLACK, (cx, 74), 11)
-                pygame.draw.circle(screen, YELLOW if i < self.score[side] else DARK_GRAY, (cx, 74), 8)
-                pygame.draw.circle(screen, WHITE, (cx, 74), 10, 2)
-        draw_text(f"Rodada {self.round_number}", tiny_font, WHITE, SCREEN_WIDTH // 2, 74, "center", shadow=True)
+                pygame.draw.circle(screen, BLACK, (cx, 88), 11)
+                pygame.draw.circle(screen, YELLOW if i < self.score[side] else DARK_GRAY, (cx, 88), 8)
+                pygame.draw.circle(screen, WHITE, (cx, 88), 10, 2)
+            # tecla do SUPER: só para quem joga no teclado
+            key_label = SUPER_KEYS[side] if self.tags[side] != "CPU" else None
+            draw_super_bar(f, side, key_label)
+        draw_text(f"Rodada {self.round_number}", tiny_font, WHITE, SCREEN_WIDTH // 2, 88, "center", shadow=True)
 
     def draw_banners(self):
         now = pygame.time.get_ticks()
@@ -847,9 +1054,10 @@ class CharSelect:
 
 # ---------------- JOGO ----------------
 CONTROL_HINTS = (
-    "P1:  A/D andar  •  W pular  •  R/T golpes",
-    "P2:  Setas andar e pular  •  N/M golpes",
-    "Segure para trás para defender  •  F1 hitboxes  •  F11 tela cheia",
+    "P1:  A/D andar  •  W pular  •  R/T golpes  •  Y super",
+    "P2:  Setas andar e pular  •  N/M golpes  •  Vírgula super",
+    "Toque para trás na hora do golpe: PARRY  •  Dois toques numa direção: dash",
+    "F1 hitboxes  •  F11 tela cheia",
 )
 
 
@@ -980,7 +1188,7 @@ class Game:
         screen.blit(pause_overlay, (0, 0))
         draw_text("PAUSADO", title_font, YELLOW, SCREEN_WIDTH // 2, 130, "center", shadow=True)
         self.option_rects = draw_options(self.menu_options(), self.selected, 245)
-        hints = CONTROL_HINTS if self.mode == MODE_VERSUS else (CONTROL_HINTS[0], CONTROL_HINTS[2])
+        hints = CONTROL_HINTS if self.mode == MODE_VERSUS else (CONTROL_HINTS[0],) + CONTROL_HINTS[2:]
         for i, hint in enumerate(hints):
             draw_text(hint, tiny_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 578 - (len(hints) - 1 - i) * 22,
                       "center", shadow=True)

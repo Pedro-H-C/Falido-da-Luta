@@ -1,3 +1,4 @@
+import math
 import random
 from collections import namedtuple
 
@@ -7,43 +8,92 @@ DEBUG = False  # F1 no jogo mostra/esconde as hitboxes
 
 GRAVITY = 2
 GROUND_MARGIN = 110
+FRAME_MS = 1000 / 60
 
 # Configuração dos golpes:
 #   damage    -> dano base (multiplicado pelo dmg_mult do personagem)
 #   range     -> alcance (multiplicador da largura do corpo)
 #   cooldown  -> frames de espera depois do golpe
 #   knockback -> força do empurrão no oponente
+#   stamina   -> custo; com estamina suficiente o golpe gasta e o cooldown cai (STAMINA_COOLDOWN_MULT)
+SUPER = 3
 ATTACKS = {
-    1: {"damage": 7,  "range": 1.6, "cooldown": 15, "knockback": 6},   # golpe rápido
-    2: {"damage": 14, "range": 2.2, "cooldown": 40, "knockback": 14},  # golpe forte
+    1: {"damage": 7,  "range": 1.6, "cooldown": 15, "knockback": 6,  "stamina": 12},  # golpe rápido
+    2: {"damage": 14, "range": 2.2, "cooldown": 40, "knockback": 14, "stamina": 22},  # golpe forte
+    SUPER: {"damage": 28, "range": 2.8, "cooldown": 30, "knockback": 28, "stamina": 0},
 }
-BLOCK_DAMAGE_MULT = 0.25   # defendendo, toma só 25% do dano
+ATTACK_ACTION = {1: 3, 2: 4, SUPER: 7}   # golpe -> linha de animação
+ATTACK_ACTIONS = set(ATTACK_ACTION.values())
 HIT_RECOVERY = 10          # frames sem poder atacar após levar dano
 TRAIL_DELAY = 30           # frames até a barra "fantasma" de vida começar a descer
 TRAIL_SPEED = 0.8          # quanto a barra fantasma desce por frame
 
-# Velocidade (ms por frame) de cada animação; o resto usa 100
-ANIM_SPEED = {3: 80, 4: 110, 5: 90}
+# PARRY: tocar para trás abre uma janela curta; o golpe que chegar nela não causa dano
+PARRY_WINDOW = 9           # frames da janela depois de tocar para trás
+PARRY_WHIFF_COOLDOWN = 24  # frames extras sem poder tentar de novo (contra apertar sem parar)
+PARRY_STUN = 40            # frames que o atacante fica tonto depois de ser parado
+PARRY_PUSHBACK = 8         # empurrão no atacante
+
+# ESTAMINA
+STAMINA_REGEN = 0.7            # por frame
+STAMINA_REGEN_DELAY = 45       # frames sem gastar até começar a recarregar
+STAMINA_COOLDOWN_MULT = 0.4    # cooldown do golpe que gastou estamina
+
+# DASH: dois toques rápidos na mesma direção
+DASH_COST = 30
+DASH_FRAMES = 10
+DASH_IFRAMES = 6           # primeiros frames do dash são invencíveis
+DASH_SPEED = 24
+DASH_TAP_WINDOW = 14       # frames entre os dois toques
+DASH_COOLDOWN = 12
+
+# SUPER: barra enche acertando, apanhando e (principalmente) com parry
+SUPER_MAX = 100
+SUPER_GAIN_HIT = {1: 8, 2: 14, SUPER: 0}
+SUPER_GAIN_HURT = 5
+SUPER_GAIN_PARRY = 25
+SUPER_COLOR_DEFAULT = (255, 200, 60)
+# SUPER aéreo (personagens com "launch"): os dois sobem e o golpe sai lá em cima
+JUGGLE_PULL = 0.3          # quanto o oponente lançado é puxado por frame até ficar na frente
+JUGGLE_MAX_WAIT = 45       # frames no máximo esperando o golpe no alto (segurança)
+SUPER_AIR_POP = -16        # o golpe final ainda joga o oponente um pouco mais para cima
+
+# Velocidade (ms por frame) de cada animação; o resto usa 100.
+# O SUPER com sprite próprio usa o "frame_ms" do personagem.
+ANIM_SPEED = {3: 80, 4: 110, 5: 90, 7: 110}
 
 CONTROLS = {
     1: {"left": pygame.K_a, "right": pygame.K_d, "jump": pygame.K_w,
-        "atk1": pygame.K_r, "atk2": pygame.K_t},
+        "atk1": pygame.K_r, "atk2": pygame.K_t, "super": pygame.K_y},
     2: {"left": pygame.K_LEFT, "right": pygame.K_RIGHT, "jump": pygame.K_UP,
-        "atk1": pygame.K_n, "atk2": pygame.K_m},
+        "atk1": pygame.K_n, "atk2": pygame.K_m, "super": pygame.K_COMMA},
 }
 
 # O que o lutador quer fazer neste frame. Vem do teclado (jogador) ou da IA (CPU).
-INTENT_KEYS = ("left", "right", "jump", "block", "atk1", "atk2")
+#   parry -> True só no frame em que tocou para trás | dash -> -1, 0 ou +1
+INTENT_KEYS = ("left", "right", "jump", "parry", "dash", "atk1", "atk2", "super")
 
 # Golpe que encostou no oponente; o main usa para hitstop, faíscas e tremor de tela.
-#   kind: "hit" ou "block" | pos: ponto de contato | direction: +1 empurra p/ direita, -1 p/ esquerda
-HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko")
+#   kind: "hit", "parry" ou "launch" (início do SUPER aéreo) | pos: ponto de contato
+#   direction: +1 empurra p/ direita, -1 p/ esquerda | color: cor do SUPER (None nos golpes normais)
+HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", defaults=(None,))
 
 
 # ---------------- PERSONAGENS ----------------
 # data       -> [tamanho do frame na sheet, escala, offset do desenho em relação à hitbox]
 # anim_steps -> frames de cada linha: idle, corrida, pulo, golpe 1, golpe 2, dano, morte
-# stats      -> vida máxima, velocidade, força do pulo (negativo = para cima), multiplicador de dano
+# stats      -> vida máxima, velocidade, força do pulo (negativo = para cima), multiplicador de dano, estamina
+# super      -> (opcional) sprite próprio do SUPER, montado com tools/montar_super.py:
+#   rect     -> (x, y, largura, altura) do frame do SUPER em relação ao frame normal (pixels do jogo)
+#   frame_ms -> duração de cada frame; o golpe acerta no frame do meio (len // 2)
+#   range    -> alcance do SUPER
+#   color    -> cor dos efeitos (anéis, faíscas)
+#   fx       -> efeito desenhado à frente no impacto: origin = (à frente do centro, acima do chão)
+#               onde fica o canto esquerdo do efeito na linha "ground" da imagem
+#   launch   -> SUPER aéreo: no frame "frame" uma explosão lança os dois "rise" px para cima, com o
+#               oponente a "gap" px na frente; o golpe (frame do meio) acerta no alto. "damage" é o
+#               dano do lançamento (sai do dano total do SUPER). Se o lançamento errar, o SUPER sai no chão.
+# Sem "super", o SUPER usa o golpe forte com brilho dourado.
 CHARACTERS = [
     {
         "id": "igor",
@@ -51,8 +101,17 @@ CHARACTERS = [
         "sheet_path": "assets/images/Sprites/igor.png",
         "data": [250, 1.5, [120, 70]],
         "anim_steps": [4, 6, 5, 6, 5, 4, 5],
-        "stats": {"max_health": 110, "speed": 7, "jump_vel": -28, "dmg_mult": 1.15},
+        "stats": {"max_health": 110, "speed": 7, "jump_vel": -28, "dmg_mult": 1.15, "stamina": 90},
         "tagline": "Bruto, forte e lento",
+        "super": {
+            "sheet_path": "assets/images/Sprites/igor_super.png",
+            "rect": (57, -103, 342, 470),
+            "frame_ms": (90, 90, 170, 160, 150, 130),
+            "range": 3.6,
+            "color": (255, 200, 60),
+            "fx": {"sheet_path": "assets/images/Sprites/igor_super_fx.png", "size": (381, 311),
+                   "ground": 306, "origin": (24, -6), "frame_ticks": 5},
+        },
     },
     {
         "id": "macedo",
@@ -60,8 +119,35 @@ CHARACTERS = [
         "sheet_path": "assets/images/Sprites/macedo.png",
         "data": [250, 1.5, [120, 70]],
         "anim_steps": [4, 6, 5, 4, 5, 4, 5],
-        "stats": {"max_health": 100, "speed": 9, "jump_vel": -31, "dmg_mult": 1.05},
+        "stats": {"max_health": 100, "speed": 9, "jump_vel": -31, "dmg_mult": 1.05, "stamina": 120},
         "tagline": "Forte e ágil",
+        "super": {
+            "sheet_path": "assets/images/Sprites/macedo_super.png",
+            "rect": (16, -245, 468, 617),
+            "frame_ms": (90, 90, 210, 170, 150, 120, 130),
+            "range": 2.0,
+            "color": (90, 170, 255),
+            "launch": {"frame": 2, "rise": 150, "gap": 125, "damage": 6},
+        },
+    },
+    {
+        "id": "manko",
+        "name": "Manko",
+        "sheet_path": "assets/images/Sprites/manko.png",
+        "data": [250, 1.5, [120, 70]],
+        "anim_steps": [4, 4, 5, 4, 4, 4, 5],
+        "stats": {"max_health": 90, "speed": 6, "jump_vel": -25, "dmg_mult": 1.25, "stamina": 100},
+        "tagline": "Muito forte, mas lento",
+    },
+    {
+        # sheet em resolução dobrada (frames de 500px); escala menor deixa ele ~8% mais alto que os outros
+        "id": "zuzu",
+        "name": "Zuzu",
+        "sheet_path": "assets/images/Sprites/zuzu.png",
+        "data": [500, 0.74, [118, 76]],
+        "anim_steps": [4, 4, 5, 4, 4, 4, 5],
+        "stats": {"max_health": 115, "speed": 9, "jump_vel": -31, "dmg_mult": 1.2, "stamina": 100},
+        "tagline": "O mais poderoso de todos",
     },
 ]
 CHARACTERS_BY_ID = {char["id"]: char for char in CHARACTERS}
@@ -71,6 +157,7 @@ CHARACTERS_BY_ID = {char["id"]: char for char in CHARACTERS}
 # Cada sheet é lida do disco uma única vez; a seleção e a luta reaproveitam as mesmas
 # surfaces. Ninguém altera uma surface do cache (o draw sempre trabalha numa cópia).
 _frame_cache = {}
+_fx_cache = {}
 
 # Paleta alternativa do P2 em luta espelho: a pele quase não muda e a roupa fica azul-marinho
 ALT_PALETTE_MULT = (225, 220, 185)
@@ -85,6 +172,20 @@ def apply_alt_palette(image):
     return tinted
 
 
+def _gold_tint(image):
+    """SUPER genérico (sem sprite próprio): golpe forte dourado."""
+    tinted = image.copy()
+    tinted.fill((255, 225, 140), special_flags=pygame.BLEND_RGB_MULT)
+    tinted.fill((70, 50, 0), special_flags=pygame.BLEND_RGB_ADD)
+    return tinted
+
+
+def _strip(path, width, height):
+    """Frames de uma sheet de uma linha só."""
+    sheet = pygame.image.load(path).convert_alpha()
+    return [sheet.subsurface(i * width, 0, width, height).copy() for i in range(sheet.get_width() // width)]
+
+
 def _slice_sheet(char):
     size, scale, _ = char["data"]
     scaled_size = int(size * scale)
@@ -96,6 +197,13 @@ def _slice_sheet(char):
             frame = sheet.subsurface(col * size, row * size, size, size)
             frames.append(pygame.transform.scale(frame, (scaled_size, scaled_size)))
         animations.append(frames)
+
+    # linha 7: SUPER (sprite próprio ou o golpe forte dourado)
+    sup = char.get("super")
+    if sup:
+        animations.append(_strip(sup["sheet_path"], sup["rect"][2], sup["rect"][3]))
+    else:
+        animations.append([_gold_tint(frame) for frame in animations[4]])
     return animations
 
 
@@ -115,10 +223,19 @@ def get_frames(char_id, alt_palette=False):
     return _frame_cache[key]
 
 
+def get_super_fx(char_id):
+    """Frames do efeito do SUPER (olhando para a direita), ou None se o personagem não tiver."""
+    if char_id not in _fx_cache:
+        fx = CHARACTERS_BY_ID[char_id].get("super", {}).get("fx")
+        _fx_cache[char_id] = _strip(fx["sheet_path"], *fx["size"]) if fx else None
+    return _fx_cache[char_id]
+
+
 def preload_characters():
     """Carrega o elenco inteiro. Chamar uma vez, depois de pygame.display.set_mode()."""
     for char in CHARACTERS:
         get_frames(char["id"])
+        get_super_fx(char["id"])
 
 
 # ---------------- IA DA CPU ----------------
@@ -126,20 +243,22 @@ DIFFICULTIES = ("easy", "normal", "hard")
 DIFFICULTY_LABELS = {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
 
 # think        -> frames entre decisões (menor = reage mais rápido)
-# block        -> chance de defender um golpe que vai alcançar a CPU
-# block_delay  -> frames até levantar a guarda depois de ver o golpe começar
+# parry        -> chance de tentar o parry num golpe que vai alcançar a CPU
+# parry_error  -> erro máximo (frames) no tempo do parry; acerta se errar até PARRY_WINDOW // 2
 # aggression   -> 0..1, peso de avançar/atacar em vez de esperar/recuar
 # punish       -> chance de castigar o oponente preso na recuperação de um golpe
 # anti_air     -> chance de responder a um pulo na direção da CPU
-# anti_air_mix -> pesos da resposta ao pulo: (golpe, defesa, pulo)
+# anti_air_mix -> pesos da resposta ao pulo: (golpe, pulo, dash para trás)
 # jump_in      -> peso de entrar pulando
+# dash         -> peso de usar o dash para entrar/sair
+# super        -> peso de soltar o SUPER quando a barra está cheia e o oponente está no alcance
 AI_PROFILES = {
-    "easy": {"think": (26, 44), "block": 0.15, "block_delay": (5, 9), "aggression": 0.3,
-             "punish": 0.1, "anti_air": 0.2, "anti_air_mix": (1, 3, 1), "jump_in": 0.06},
-    "normal": {"think": (14, 26), "block": 0.45, "block_delay": (3, 6), "aggression": 0.55,
-               "punish": 0.4, "anti_air": 0.45, "anti_air_mix": (2, 2, 1), "jump_in": 0.1},
-    "hard": {"think": (6, 13), "block": 0.75, "block_delay": (1, 3), "aggression": 0.8,
-             "punish": 0.85, "anti_air": 0.75, "anti_air_mix": (4, 1, 1), "jump_in": 0.12},
+    "easy": {"think": (26, 44), "parry": 0.3, "parry_error": 9, "aggression": 0.3, "punish": 0.1,
+             "anti_air": 0.2, "anti_air_mix": (1, 1, 1), "jump_in": 0.06, "dash": 0.04, "super": 0.3},
+    "normal": {"think": (14, 26), "parry": 0.55, "parry_error": 6, "aggression": 0.55, "punish": 0.4,
+               "anti_air": 0.45, "anti_air_mix": (2, 1, 1), "jump_in": 0.1, "dash": 0.1, "super": 0.7},
+    "hard": {"think": (6, 13), "parry": 0.8, "parry_error": 5, "aggression": 0.8, "punish": 0.85,
+             "anti_air": 0.75, "anti_air_mix": (4, 1, 1), "jump_in": 0.12, "dash": 0.18, "super": 1.0},
 }
 
 
@@ -150,9 +269,9 @@ class _CpuMemory:
         self.plan = "wait"
         self.think_timer = 0
         self.jump_started = False
-        self.threat_seen = False   # já sorteou a defesa contra o golpe atual do oponente?
-        self.block_in = -1         # frames até levantar a guarda (-1 = não vai defender)
-        self.guarding = False
+        self.threat_seen = False   # já sorteou o parry contra o golpe atual do oponente?
+        self.parry_in = -1         # frames até tocar para trás (-1 = não vai tentar)
+        self.bracing = False       # já tocou para trás: fica parada esperando o golpe
         self.punish_seen = False   # já sorteou o castigo da recuperação atual do oponente?
         self.air_seen = False      # já sorteou o anti-aéreo do pulo atual do oponente?
 
@@ -164,17 +283,24 @@ class Fighter():
         self.name = character["name"]
         self.controls = CONTROLS[player]
         self.offset = character["data"][2]
+        self.frame_size = int(character["data"][0] * character["data"][1])
+        self.super_data = character.get("super")
+        self.super_range = (self.super_data or {}).get("range", ATTACKS[SUPER]["range"])
+        self.super_color = (self.super_data or {}).get("color", SUPER_COLOR_DEFAULT)
+        self.launch = (self.super_data or {}).get("launch")
         stats = character["stats"]
         self.max_health = stats["max_health"]
         self.speed = stats["speed"]
         self.jump_vel = stats["jump_vel"]
         self.dmg_mult = stats["dmg_mult"]
+        self.max_stamina = stats.get("stamina", 100)
         self.is_cpu = is_cpu
         self.cpu_diff = cpu_diff
         self.ai = _CpuMemory() if is_cpu else None
         self.flip = flip
         self.animation_list = get_frames(character["id"], alt_palette)
-        self.action = 0  # 0: idle, 1: run, 2: jump, 3: attack1, 4: attack2, 5: hit, 6: death
+        # 0: idle, 1: run, 2: jump, 3: attack1, 4: attack2, 5: hit, 6: death, 7: super
+        self.action = 0
         self.frame_index = 0
         self.image = self.animation_list[self.action][self.frame_index]
         self.update_time = pygame.time.get_ticks()
@@ -184,75 +310,192 @@ class Fighter():
         self.knockback = 0
         self.running = False
         self.jumping = False
-        self.blocking = False
         self.attacking = False
         self.attack_type = 0
         self.attack_cooldown = 0
+        self.attack_fast = False       # o golpe atual gastou estamina (cooldown menor)
         self.attack_hit_done = False   # garante 1 acerto por golpe
-        self.attack_landed = False     # o golpe atual encostou no oponente (acerto ou defesa)?
+        self.attack_landed = False     # o golpe atual encostou no oponente (acerto ou parry)?
         self.attack_rect = None        # só para debug
         self.attack_rect_timer = 0
         self.hit = False
+        self.stun_timer = 0            # tonto depois de ter o golpe parado
         self.flash_timer = 0           # pisca branco ao tomar dano
-        self.block_flash = 0           # pisca azul ao defender
+        self.parry_timer = 0           # janela de parry aberta
+        self.parry_cooldown = 0
+        self.parry_flash = 0           # brilho azul do parry certo
+        self.stamina = self.max_stamina
+        self.stamina_delay = 0
+        self.dash_timer = 0
+        self.dash_dir = 0
+        self.dash_cooldown = 0
+        self.ghosts = []               # rastro do dash: [x, y, imagem, flip, vida]
+        self.super_meter = 0
+        self.launch_done = False       # SUPER aéreo: já tentou lançar?
+        self.super_air = False         # SUPER aéreo: lançou e está no alto
+        self.juggled = False           # foi lançado pelo SUPER de alguém (sem controle até cair)
+        self.juggle_x = None           # onde ficar (centro) esperando o golpe no alto
+        self.juggle_timer = 0
+        self.signals = []              # avisos para o main: "super_start", "super_impact", "land"
+        self.tick = 0
+        self.prev_held = {}            # teclas do frame anterior (para saber o instante do toque)
+        self.last_tap = None           # última direção tocada (dash)
+        self.last_tap_tick = 0
         self.health = self.max_health
         self.health_trail = self.max_health  # barra "fantasma" do HUD, desce atrasada
         self.trail_delay = 0
         self.alive = True
 
+    # ---------------- CONSULTAS ----------------
     def attack_reach(self, attack_type):
-        return int(self.rect.width * ATTACKS[attack_type]["range"])
+        mult = self.super_range if attack_type == SUPER else ATTACKS[attack_type]["range"]
+        return int(self.rect.width * mult)
+
+    def frame_ms(self, action, index):
+        if action == 7 and self.super_data:
+            timings = self.super_data["frame_ms"]
+            return timings[min(index, len(timings) - 1)]
+        return ANIM_SPEED.get(action, 100)
 
     def attack_startup(self, attack_type):
         """Tempo (ms) do início do golpe até o frame de impacto."""
-        action = 3 if attack_type == 1 else 4
-        return len(self.animation_list[action]) // 2 * ANIM_SPEED.get(action, 100)
+        action = ATTACK_ACTION[attack_type]
+        impact = len(self.animation_list[action]) // 2
+        return sum(self.frame_ms(action, i) for i in range(impact))
 
+    def impact_frame(self):
+        """Frame em que o golpe atual encosta (no SUPER aéreo, primeiro vem o lançamento)."""
+        if self.attack_type == SUPER and self.launch and not self.launch_done:
+            return self.launch["frame"]
+        return len(self.animation_list[self.action]) // 2
+
+    def frames_to_impact(self):
+        """Frames até o golpe atual encostar (0 se não está atacando ou já passou do impacto)."""
+        if not self.attacking or self.attack_hit_done:
+            return 0
+        ms = sum(self.frame_ms(self.action, i) for i in range(self.frame_index, self.impact_frame()))
+        ms -= pygame.time.get_ticks() - self.update_time
+        return max(0, round(ms / FRAME_MS))
+
+    def floating(self):
+        """SUPER aéreo: quem lançou fica parado no alto durante o golpe, e o lançado espera o golpe lá."""
+        if self.vel_y < 0:
+            return False
+        if self.super_air and self.attacking:
+            impact = len(self.animation_list[7]) // 2
+            return self.frame_index in (impact, impact + 1)
+        return self.juggled and self.juggle_x is not None
+
+    def super_ready(self):
+        return self.super_meter >= SUPER_MAX
+
+    def can_dash(self):
+        return self.dash_cooldown == 0 and self.stamina >= DASH_COST and not self.jumping
+
+    def invulnerable(self):
+        """Início do dash e começo do SUPER (até o impacto) não podem ser acertados."""
+        dodging = self.dash_timer > DASH_FRAMES - DASH_IFRAMES
+        super_startup = self.attacking and self.attack_type == SUPER and not self.attack_hit_done
+        return dodging or super_startup
+
+    def visual_center_x(self):
+        """Centro do desenho (a sombra usa), igual para frames normais e do SUPER."""
+        return self.rect.x - self.offset[0] + self.frame_size // 2
+
+    def pop_signals(self):
+        signals, self.signals = self.signals, []
+        return signals
+
+    def spend_stamina(self, amount):
+        self.stamina = max(0, self.stamina - amount)
+        self.stamina_delay = STAMINA_REGEN_DELAY
+
+    def gain_super(self, amount):
+        self.super_meter = min(SUPER_MAX, self.super_meter + amount)
+
+    # ---------------- MOVIMENTO ----------------
     def move(self, screen_width, screen_height, target, can_act=True):
         """Controles + física de um frame. Retorna um HitEvent se um golpe encostou no oponente."""
         dx = 0
         dy = 0
         self.running = False
-        self.blocking = False
+        self.tick += 1
         on_ground = not self.jumping
         hit_event = None
+        if self.parry_timer > 0:
+            self.parry_timer -= 1
+        if self.parry_cooldown > 0:
+            self.parry_cooldown -= 1
+        if self.dash_cooldown > 0:
+            self.dash_cooldown -= 1
 
-        # CONTROLES (bloqueados se estiver atacando, tomando dano ou morto)
-        if can_act and self.alive and not self.hit and not self.attacking:
-            inputs = self._compute_ai_inputs(target) if self.is_cpu else self._read_player_inputs(target)
+        # o teclado é lido todo frame para perceber o instante exato do toque
+        player_inputs = None if self.is_cpu else self._read_player_inputs(target)
 
-            if inputs["left"]:
-                dx = -self.speed
-                self.running = True
-            if inputs["right"]:
-                dx = self.speed
-                self.running = True
+        if self.dash_timer > 0:
+            # DASH: rápido no começo e desacelerando; sem controle até acabar
+            self.dash_timer -= 1
+            dx = round(self.dash_dir * DASH_SPEED * (0.4 + 0.6 * self.dash_timer / DASH_FRAMES))
+            self.running = True
+            if self.tick % 2 == 0:
+                self.ghosts.append([self.rect.x, self.rect.y, self.image, self.flip, 10])
+        elif can_act and self.alive and not self.hit and not self.attacking:
+            inputs = self._compute_ai_inputs(target) if self.is_cpu else player_inputs
 
-            # DEFESA: só no chão; anda mais devagar defendendo
-            if inputs["block"] and on_ground:
-                self.blocking = True
-                dx = int(dx / 2)
+            if inputs["dash"] and on_ground and self.can_dash():
+                self.start_dash(inputs["dash"])
+            else:
+                if inputs["left"]:
+                    dx = -self.speed
+                    self.running = True
+                if inputs["right"]:
+                    dx = self.speed
+                    self.running = True
 
-            if inputs["jump"] and on_ground:
-                self.vel_y = self.jump_vel
-                self.jumping = True
+                # PARRY: só no chão; segurar para trás não defende, só o toque conta
+                if inputs["parry"] and on_ground and self.parry_cooldown == 0:
+                    self.parry_timer = PARRY_WINDOW
+                    self.parry_cooldown = PARRY_WINDOW + PARRY_WHIFF_COOLDOWN
 
-            # ATAQUES
-            if inputs["atk1"]:
-                self.start_attack(1)
-            elif inputs["atk2"]:
-                self.start_attack(2)
+                if inputs["jump"] and on_ground:
+                    self.vel_y = self.jump_vel
+                    self.jumping = True
+
+                # ATAQUES
+                if inputs["super"] and on_ground and self.super_ready():
+                    self.start_attack(SUPER)
+                elif inputs["atk1"]:
+                    self.start_attack(1)
+                elif inputs["atk2"]:
+                    self.start_attack(2)
+
+        # SUPER aéreo: antes do golpe vem o lançamento
+        if (self.attacking and self.attack_type == SUPER and self.launch and not self.launch_done
+                and self.frame_index >= self.launch["frame"]):
+            self.launch_done = True
+            hit_event = self.try_launch(target, screen_width)
 
         # O dano só sai no meio da animação do golpe (frame de impacto)
-        if self.attacking and not self.attack_hit_done and self.action in (3, 4):
-            impact_frame = len(self.animation_list[self.action]) // 2
-            if self.frame_index >= impact_frame:
+        if self.attacking and not self.attack_hit_done and self.action in ATTACK_ACTIONS:
+            if self.frame_index >= self.impact_frame():
                 self.attack_hit_done = True
-                hit_event = self.resolve_attack(target)
+                if self.attack_type == SUPER:
+                    self.signals.append("super_impact")
+                hit_event = self.resolve_attack(target) or hit_event
 
         # FÍSICA (sempre roda, mesmo sem controle)
-        self.vel_y += GRAVITY
+        if self.floating():
+            self.vel_y = 0
+        else:
+            self.vel_y += GRAVITY
         dy += self.vel_y
+
+        # lançado pelo SUPER aéreo: vai para a frente de quem lançou e espera o golpe no alto
+        if self.juggle_x is not None:
+            dx += round((self.juggle_x - self.rect.centerx) * JUGGLE_PULL)
+            self.juggle_timer -= 1
+            if self.juggle_timer <= 0:
+                self.juggle_x = None
 
         if abs(self.knockback) > 0.5:
             dx += round(self.knockback)
@@ -269,6 +512,10 @@ class Fighter():
             self.vel_y = 0
             dy = screen_height - GROUND_MARGIN - self.rect.bottom
             self.jumping = False
+            if self.juggled:
+                self.juggled = False
+                self.juggle_x = None
+                self.signals.append("land")
 
         # Olha para o oponente (mas não vira no meio do golpe)
         if not self.attacking and self.alive:
@@ -293,18 +540,40 @@ class Fighter():
         return hit_event
 
     def _read_player_inputs(self, target):
-        """Teclado -> intenções. Defender = segurar para trás (longe do oponente)."""
+        """Teclado -> intenções. Parry = TOCAR para trás (longe do oponente); dash = 2 toques."""
         key = pygame.key.get_pressed()
         c = self.controls
-        back_key = c["left"] if target.rect.centerx > self.rect.centerx else c["right"]
+        held = {name: bool(key[c[name]]) for name in ("left", "right", "jump", "atk1", "atk2", "super")}
+        pressed = {name: down and not self.prev_held.get(name, False) for name, down in held.items()}
+        self.prev_held = held
+
+        back = "left" if target.rect.centerx > self.rect.centerx else "right"
+        dash = 0
+        for name, direction in (("left", -1), ("right", 1)):
+            if pressed[name]:
+                if self.last_tap == name and self.tick - self.last_tap_tick <= DASH_TAP_WINDOW:
+                    dash = direction
+                    self.last_tap = None
+                else:
+                    self.last_tap = name
+                    self.last_tap_tick = self.tick
         return {
-            "left": key[c["left"]],
-            "right": key[c["right"]],
-            "jump": key[c["jump"]],
-            "block": key[back_key],
-            "atk1": key[c["atk1"]],
-            "atk2": key[c["atk2"]],
+            "left": held["left"],
+            "right": held["right"],
+            "jump": held["jump"],
+            "parry": pressed[back],
+            "dash": dash,
+            "atk1": held["atk1"],
+            "atk2": held["atk2"],
+            "super": pressed["super"],
         }
+
+    def start_dash(self, direction):
+        self.spend_stamina(DASH_COST)
+        self.dash_timer = DASH_FRAMES
+        self.dash_dir = direction
+        self.dash_cooldown = DASH_FRAMES + DASH_COOLDOWN
+        self.parry_timer = 0
 
     # ---------------- IA ----------------
     def _compute_ai_inputs(self, target):
@@ -317,27 +586,29 @@ class Fighter():
         toward = "right" if target.rect.centerx > self.rect.centerx else "left"
         away = "left" if toward == "right" else "right"
 
-        # 1) DEFESA: cada golpe do oponente é avaliado uma única vez
-        if target.attacking and not target.attack_hit_done:
-            if not mem.threat_seen:
-                mem.threat_seen = True
-                danger = target.attack_reach(target.attack_type) + self.rect.width // 2 + 40
-                if dist <= danger and random.random() < profile["block"]:
-                    mem.block_in = random.randint(*profile["block_delay"])
-        elif not target.attacking:
+        # 1) PARRY: cada golpe do oponente é avaliado uma única vez. A CPU mira no meio da
+        #    janela, mas erra o tempo conforme a dificuldade (às vezes toca cedo ou tarde demais).
+        threat = target.attacking and not target.attack_hit_done
+        if threat and not mem.threat_seen:
+            mem.threat_seen = True
+            danger = target.attack_reach(target.attack_type) + self.rect.width // 2 + 40
+            if dist <= danger and random.random() < profile["parry"]:
+                err = profile["parry_error"]
+                aim = target.frames_to_impact() - (PARRY_WINDOW + 1) // 2
+                mem.parry_in = max(0, aim + random.randint(-err, err))
+        if not target.attacking:
             mem.threat_seen = False
             mem.punish_seen = False
 
-        if mem.block_in > 0:
-            mem.block_in -= 1
-        elif mem.block_in == 0:
-            mem.block_in = -1
-            mem.guarding = True
-        if mem.guarding:
-            if target.attacking and not target.attack_hit_done:
-                inputs["block"] = True
-                return inputs
-            mem.guarding = False
+        if threat and (mem.parry_in >= 0 or mem.bracing):
+            if mem.parry_in == 0:
+                inputs["parry"] = True
+                mem.bracing = True
+            if mem.parry_in >= 0:
+                mem.parry_in -= 1
+            return inputs  # parada, esperando o golpe
+        mem.parry_in = -1
+        mem.bracing = False
 
         # 2) CASTIGO: o golpe do oponente já passou do impacto e ele está preso na animação
         if target.attacking and target.attack_hit_done and not mem.punish_seen:
@@ -350,7 +621,7 @@ class Fighter():
             mem.air_seen = True
             coming = target.last_dx * (self.rect.centerx - target.rect.centerx) > 0
             if (dist < 260 or (coming and dist < 450)) and random.random() < profile["anti_air"]:
-                plan = random.choices(("anti_air", "air_guard", "air_to_air"), weights=profile["anti_air_mix"])[0]
+                plan = random.choices(("anti_air", "air_to_air", "dash_away"), weights=profile["anti_air_mix"])[0]
                 self._ai_set_plan(plan, 45)
         elif not target.jumping:
             mem.air_seen = False
@@ -372,38 +643,41 @@ class Fighter():
         self.ai.jump_started = False
 
     def _ai_choose_plan(self, target, dist, profile):
-        """Sorteia o próximo plano conforme a distância (perto / meio / longe).
-
-        Recuar também defende (mesma regra do jogador), então recuo e guarda pesam
-        conforme a habilidade de defesa; a CPU passiva no fácil fica parada, aberta.
-        """
+        """Sorteia o próximo plano conforme a distância (perto / meio / longe)."""
         agg = profile["aggression"]
-        skill = profile["block"]
+        skill = profile["parry"]
+        dash = profile["dash"] if self.stamina >= DASH_COST + 15 else 0
+        super_w = profile["super"] if self.super_ready() and self._ai_in_reach(target, SUPER, dist) else 0
         if self._ai_in_reach(target, 1, dist):
-            # PERTO: mistura golpe rápido e forte, abre espaço ou fecha a guarda
+            # PERTO: mistura golpe rápido e forte, abre espaço ou espera o golpe para dar parry
             weights = {
                 "atk1": 0.45 * agg + (0.3 * agg if target.hit else 0),
                 "atk2": 0.3 * agg,
+                "super": super_w * (2 if target.stun_timer > 0 else 1),
                 "retreat": 0.25 * skill + 0.02,
-                "guard": 0.25 * skill,
-                "wait": 0.3 * (1 - agg) + 0.03,
+                "dash_out": dash,
+                "wait": 0.3 * (1 - agg) + 0.2 * skill + 0.03,
             }
         elif dist <= self.attack_reach(2) + target.rect.width // 2 + 110:
             # MEIO: footsies (vai e volta na beira do alcance) e cutucadas
             weights = {
                 "poke": 0.35 * agg + 0.05,
                 "atk2": 0.25 * agg if self._ai_in_reach(target, 2, dist) else 0,
+                "super": super_w,
                 "footsie": 0.05 + 0.4 * agg * skill,
                 "approach": 0.2,
+                "dash_in": dash * 0.6,
                 "retreat": 0.2 * skill,
                 "jump_in": profile["jump_in"],
                 "wait": 0.3 * (1 - agg) + 0.03,
             }
         else:
-            # LONGE: encurta a distância, às vezes pulando
+            # LONGE: encurta a distância, às vezes pulando ou com dash
             weights = {
                 "approach": 0.35 + 0.5 * agg,
                 "jump_in": profile["jump_in"] * 2,
+                "dash_in": dash * 1.5,
+                "super": super_w,
                 "wait": 0.45 * (1 - agg) + 0.03,
             }
         plans = list(weights)
@@ -417,9 +691,6 @@ class Fighter():
             inputs[toward] = True
         elif plan == "retreat":
             inputs[away] = True
-            inputs["block"] = True  # andar para trás defende, igual ao jogador
-        elif plan == "guard":
-            inputs["block"] = True
         elif plan == "footsie":
             # fica na beira do alcance do golpe forte esperando o oponente errar
             ideal = self.attack_reach(2) + target.rect.width // 2 + 25
@@ -427,7 +698,20 @@ class Fighter():
                 inputs[toward] = True
             elif dist < ideal - 20:
                 inputs[away] = True
-                inputs["block"] = True
+        elif plan in ("dash_in", "dash_out", "dash_away"):
+            direction = toward if plan == "dash_in" else away
+            if self.can_dash():
+                inputs["dash"] = 1 if direction == "right" else -1
+                self._ai_set_plan("wait", 6)
+            else:
+                inputs[direction] = True
+        elif plan == "super":
+            if self.super_ready() and self._ai_in_reach(target, SUPER, dist):
+                self._ai_press_attack(inputs, SUPER)
+            elif self.super_ready():
+                inputs[toward] = True
+            else:
+                self._ai_set_plan("wait", 4)
         elif plan in ("atk1", "atk2", "poke"):
             attack = 2 if plan == "atk2" else 1
             if self._ai_in_reach(target, attack, dist):
@@ -435,11 +719,16 @@ class Fighter():
             else:
                 inputs[toward] = True
         elif plan == "punish":
-            attack = self._ai_fastest_attack(target, dist)
-            if attack:
-                self._ai_press_attack(inputs, attack)
+            # oponente tonto depois do parry: no normal/difícil a CPU gasta o SUPER se tiver
+            if (target.stun_timer > 0 and self.super_ready() and self.cpu_diff != "easy"
+                    and self._ai_in_reach(target, SUPER, dist)):
+                self._ai_press_attack(inputs, SUPER)
             else:
-                inputs[toward] = True
+                attack = self._ai_fastest_attack(target, dist)
+                if attack:
+                    self._ai_press_attack(inputs, attack)
+                else:
+                    inputs[toward] = True
         elif plan == "anti_air":
             # espera o oponente descer para dentro do alcance e solta o golpe
             attack = self._ai_fastest_attack(target, dist, slack=70)
@@ -447,11 +736,6 @@ class Fighter():
                 self._ai_set_plan("wait", 4)
             elif attack and target.vel_y > -8:
                 self._ai_press_attack(inputs, attack)
-        elif plan == "air_guard":
-            if target.jumping:
-                inputs["block"] = True
-            else:
-                self._ai_set_plan("wait", 4)
         elif plan in ("jump_in", "air_to_air"):
             if not mem.jump_started:
                 mem.jump_started = True
@@ -468,7 +752,10 @@ class Fighter():
         return inputs
 
     def _ai_press_attack(self, inputs, attack):
-        if self.attack_cooldown == 0:
+        if attack == SUPER:
+            inputs["super"] = True
+            self.ai.plan = "wait"
+        elif self.attack_cooldown == 0:
             inputs["atk1" if attack == 1 else "atk2"] = True
             self.ai.plan = "wait"
 
@@ -482,19 +769,30 @@ class Fighter():
 
     # ---------------- COMBATE ----------------
     def start_attack(self, attack_type):
-        if self.attack_cooldown == 0:
-            self.attacking = True
-            self.attack_type = attack_type
-            self.attack_hit_done = False
-            self.attack_landed = False
-            self.blocking = False
-            # força a animação a começar do primeiro frame
-            self.action = 3 if attack_type == 1 else 4
-            self.frame_index = 0
-            self.update_time = pygame.time.get_ticks()
+        # o SUPER ignora o cooldown (dá para usar logo depois de apanhar)
+        if attack_type != SUPER and self.attack_cooldown > 0:
+            return
+        self.attacking = True
+        self.attack_type = attack_type
+        self.attack_hit_done = False
+        self.attack_landed = False
+        self.parry_timer = 0
+        cost = ATTACKS[attack_type]["stamina"]
+        self.attack_fast = bool(cost) and self.stamina >= cost
+        if self.attack_fast:
+            self.spend_stamina(cost)
+        if attack_type == SUPER:
+            self.super_meter = 0
+            self.launch_done = False
+            self.super_air = False
+            self.signals.append("super_start")
+        # força a animação a começar do primeiro frame
+        self.action = ATTACK_ACTION[attack_type]
+        self.frame_index = 0
+        self.update_time = pygame.time.get_ticks()
 
-    def resolve_attack(self, target):
-        atk = ATTACKS[self.attack_type]
+    def _attack_box(self, target):
+        """Hitbox do golpe atual. Retorna (direção, ponto de contato) se pegou o oponente, senão None."""
         reach = self.attack_reach(self.attack_type)
         if self.flip:  # virado para a esquerda
             attack_rect = pygame.Rect(self.rect.centerx - reach, self.rect.y, reach, self.rect.height)
@@ -502,52 +800,120 @@ class Fighter():
             attack_rect = pygame.Rect(self.rect.centerx, self.rect.y, reach, self.rect.height)
         self.attack_rect = attack_rect
         self.attack_rect_timer = 8
-
-        if not (target.alive and attack_rect.colliderect(target.rect)):
+        if not (target.alive and attack_rect.colliderect(target.rect)) or target.invulnerable():
             return None
-
-        direction = 1 if target.rect.centerx > self.rect.centerx else -1
-        damage = max(1, round(atk["damage"] * self.dmg_mult))
-        blocked = target.take_hit(damage, atk["knockback"], direction)
         self.attack_landed = True
+        direction = 1 if target.rect.centerx > self.rect.centerx else -1
         # ponto de contato: lado do oponente virado para o atacante, na altura do tronco
         contact_x = target.rect.left + 15 if direction > 0 else target.rect.right - 15
-        contact_y = target.rect.y + random.randint(35, 105)
-        kind = "block" if blocked else "hit"
-        return HitEvent(kind, self.attack_type, (contact_x, contact_y), direction, not target.alive)
+        return direction, (contact_x, target.rect.y + random.randint(35, 105))
+
+    def _parried(self, target, direction, contact):
+        """PARRY: sem dano; o atacante é empurrado e fica tonto (o SUPER só é anulado)."""
+        target.on_parry()
+        self.knockback = -direction * PARRY_PUSHBACK
+        if self.attack_type == SUPER:
+            self.attack_hit_done = True  # o resto do SUPER não acerta mais
+        else:
+            self.get_stunned()
+        return HitEvent("parry", self.attack_type, contact, direction, False)
+
+    def resolve_attack(self, target):
+        hit = self._attack_box(target)
+        if not hit:
+            return None
+        direction, contact = hit
+        if target.parry_timer > 0 and not target.attacking and not target.hit:
+            return self._parried(target, direction, contact)
+
+        atk = ATTACKS[self.attack_type]
+        base = atk["damage"]
+        if self.super_air:
+            base -= self.launch["damage"]  # parte do dano já saiu no lançamento
+        damage = max(1, round(base * self.dmg_mult))
+        target.take_hit(damage, atk["knockback"], direction)
+        if self.super_air:
+            target.vel_y = SUPER_AIR_POP
+            target.juggle_x = None
+        self.gain_super(SUPER_GAIN_HIT[self.attack_type])
+        color = self.super_color if self.attack_type == SUPER else None
+        return HitEvent("hit", self.attack_type, contact, direction, not target.alive, color)
+
+    def try_launch(self, target, screen_width):
+        """Começo do SUPER aéreo: se o oponente está perto, uma explosão lança os dois para cima.
+        Se errar, o SUPER continua no chão; se levar parry, é anulado."""
+        hit = self._attack_box(target)
+        if not hit:
+            return None
+        direction, contact = hit
+        if target.parry_timer > 0 and not target.attacking and not target.hit:
+            return self._parried(target, direction, contact)
+
+        rise = -math.sqrt(2 * GRAVITY * self.launch["rise"])
+        self.vel_y = rise
+        self.jumping = True
+        self.super_air = True
+        target.take_hit(max(1, round(self.launch["damage"] * self.dmg_mult)), 0, direction)
+        target.vel_y = rise
+        target.jumping = True
+        if target.alive:
+            target.juggled = True
+            margin = target.rect.width // 2
+            gap_x = self.rect.centerx + direction * self.launch["gap"]
+            target.juggle_x = max(margin, min(screen_width - margin, gap_x))
+            target.juggle_timer = JUGGLE_MAX_WAIT
+        ground_contact = (target.rect.centerx, target.rect.bottom - 20)
+        return HitEvent("launch", SUPER, ground_contact, direction, not target.alive, self.super_color)
+
+    def on_parry(self):
+        """Parry certo: janela fecha, pode tentar de novo e contra-atacar na hora."""
+        self.parry_timer = 0
+        self.parry_cooldown = 0
+        self.parry_flash = 12
+        self.attack_cooldown = 0
+        self.gain_super(SUPER_GAIN_PARRY)
+        if self.is_cpu:
+            self.ai.bracing = False
+            self.ai.parry_in = -1
+            self._ai_set_plan("punish", 30)
+
+    def get_stunned(self):
+        self.attacking = False
+        self.hit = True
+        self.stun_timer = PARRY_STUN
+        self.dash_timer = 0
+        self.action = 5
+        self.frame_index = 0
+        self.update_time = pygame.time.get_ticks()
 
     def take_hit(self, damage, knockback, direction):
-        """Aplica o golpe. Retorna True se foi defendido."""
-        blocked = self.blocking
-        if blocked:
-            self.health -= max(1, round(damage * BLOCK_DAMAGE_MULT))
-            self.knockback = direction * knockback * 0.5
-            self.block_flash = 6
-        else:
-            self.health -= damage
-            self.knockback = direction * knockback
-            self.attacking = False  # levar golpe interrompe o seu ataque
-            self.hit = True
-            self.flash_timer = 6
-            self.action = 5
-            self.frame_index = 0
-            self.update_time = pygame.time.get_ticks()
-
+        self.health = max(0, self.health - damage)
+        self.knockback = direction * knockback
+        self.attacking = False  # levar golpe interrompe o seu ataque
+        self.hit = True
+        self.super_air = False
+        self.dash_timer = 0
+        self.parry_timer = 0
+        self.flash_timer = 6
+        self.action = 5
+        self.frame_index = 0
+        self.update_time = pygame.time.get_ticks()
+        self.gain_super(SUPER_GAIN_HURT)
         self.trail_delay = TRAIL_DELAY
-        self.health = max(0, self.health)
         if self.health == 0:
             self.alive = False
             self.hit = False
             self.attacking = False
-        return blocked
+            self.stun_timer = 0
 
+    # ---------------- ANIMAÇÃO ----------------
     def update(self):
         if not self.alive:
             self.update_action(6)  # death
         elif self.hit:
-            self.update_action(5)  # hit
+            self.update_action(5)  # hit / tonto
         elif self.attacking:
-            self.update_action(3 if self.attack_type == 1 else 4)
+            self.update_action(ATTACK_ACTION[self.attack_type])
         elif self.jumping:
             self.update_action(2)
         elif self.running:
@@ -555,31 +921,43 @@ class Fighter():
         else:
             self.update_action(0)
 
-        animation_cooldown = ANIM_SPEED.get(self.action, 100)
-        if pygame.time.get_ticks() - self.update_time > animation_cooldown:
+        if pygame.time.get_ticks() - self.update_time > self.frame_ms(self.action, self.frame_index):
             self.frame_index += 1
             self.update_time = pygame.time.get_ticks()
 
-        if self.frame_index >= len(self.animation_list[self.action]):
+        frames = len(self.animation_list[self.action])
+        if self.action == 7 and self.super_air and self.jumping and self.frame_index >= frames - 1:
+            self.frame_index = frames - 2  # SUPER aéreo: segura o penúltimo frame até pousar
+        if self.frame_index >= frames:
             if not self.alive:
-                self.frame_index = len(self.animation_list[self.action]) - 1
+                self.frame_index = frames - 1
+            elif self.action == 5 and (self.stun_timer > 0 or self.juggled):
+                self.frame_index = frames - 1  # tonto ou no ar: segura o último frame
             else:
                 self.frame_index = 0
-                if self.action in (3, 4):
+                if self.action in ATTACK_ACTIONS:
                     self.attacking = False
-                    self.attack_cooldown = ATTACKS[self.attack_type]["cooldown"]
+                    self.super_air = False
+                    cooldown = ATTACKS[self.attack_type]["cooldown"]
+                    self.attack_cooldown = round(cooldown * STAMINA_COOLDOWN_MULT) if self.attack_fast else cooldown
                 elif self.action == 5:
                     self.hit = False
                     self.attack_cooldown = HIT_RECOVERY
 
         self.image = self.animation_list[self.action][self.frame_index]
 
-        if self.flash_timer > 0:
-            self.flash_timer -= 1
-        if self.block_flash > 0:
-            self.block_flash -= 1
-        if self.attack_rect_timer > 0:
-            self.attack_rect_timer -= 1
+        for timer in ("flash_timer", "parry_flash", "attack_rect_timer", "stun_timer"):
+            if getattr(self, timer) > 0:
+                setattr(self, timer, getattr(self, timer) - 1)
+
+        if self.stamina_delay > 0:
+            self.stamina_delay -= 1
+        elif self.stamina < self.max_stamina:
+            self.stamina = min(self.max_stamina, self.stamina + STAMINA_REGEN)
+
+        for ghost in self.ghosts:
+            ghost[4] -= 1
+        self.ghosts = [g for g in self.ghosts if g[4] > 0]
 
         if self.trail_delay > 0:
             self.trail_delay -= 1
@@ -595,13 +973,43 @@ class Fighter():
     def draw(self, surface, offset=(0, 0)):
         """Desenha o lutador; offset desloca tudo (tremor de tela)."""
         ox, oy = offset
+
+        # rastro azul do dash
+        for gx, gy, image, flip, life in self.ghosts:
+            ghost = pygame.transform.flip(image, flip, False)
+            ghost.fill((40, 90, 200), special_flags=pygame.BLEND_RGB_ADD)
+            ghost.set_alpha(int(110 * life / 10))
+            surface.blit(ghost, (gx - self.offset[0] + ox, gy - self.offset[1] + oy))
+
         img = pygame.transform.flip(self.image, self.flip, False)  # cópia: o cache fica intacto
         if self.flash_timer > 0:
             img.fill((150, 150, 150), special_flags=pygame.BLEND_RGB_ADD)    # clarão branco
-        elif self.blocking or self.block_flash > 0:
-            img.fill((140, 170, 255), special_flags=pygame.BLEND_RGB_MULT)   # tom azul de defesa
+        elif self.parry_flash > 0:
+            img.fill((90, 140, 255), special_flags=pygame.BLEND_RGB_ADD)     # parry certo
+        elif self.parry_timer > 0:
+            img.fill((170, 200, 255), special_flags=pygame.BLEND_RGB_MULT)  # janela de parry aberta
+        elif self.action == 7 and not self.super_data:
+            glow = int(45 + 35 * math.sin(pygame.time.get_ticks() / 60))
+            img.fill((glow, int(glow * 0.75), 0), special_flags=pygame.BLEND_RGB_ADD)
 
-        surface.blit(img, (self.rect.x - self.offset[0] + ox, self.rect.y - self.offset[1] + oy))
+        x = self.rect.x - self.offset[0] + ox
+        y = self.rect.y - self.offset[1] + oy
+        if self.action == 7 and self.super_data:
+            # frame do SUPER é maior que o normal; rect diz onde ele fica em relação ao frame normal
+            left, top, width, _ = self.super_data["rect"]
+            x += self.frame_size - left - width if self.flip else left
+            y += top
+        surface.blit(img, (x, y))
+
+        # estrelinhas de tonto
+        if self.stun_timer > 0 and self.alive:
+            t = pygame.time.get_ticks() / 160
+            cx, cy = self.rect.centerx + ox, self.rect.y - 34 + oy
+            for i in range(3):
+                angle = t + i * 2 * math.pi / 3
+                point = (cx + math.cos(angle) * 34, cy + math.sin(angle) * 9)
+                pygame.draw.circle(surface, (255, 220, 50), point, 6)
+                pygame.draw.circle(surface, (255, 255, 255), point, 3)
 
         if DEBUG:
             pygame.draw.rect(surface, (255, 0, 0), self.rect.move(ox, oy), 2)
