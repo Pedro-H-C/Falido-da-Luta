@@ -2,6 +2,7 @@
 
 Uso (dentro da pasta Luta):
     python tools/montar_super.py igor
+    python tools/montar_super.py zuzu --opaco   (personagem sem contorno escuro, ex.: render 3D)
 
 Entrada (assets/images/Sprites/raw/):
     <id>_super_raw.png     -> linha com os frames do personagem, olhando para a DIREITA
@@ -37,6 +38,7 @@ FEET_SAT = 120         # contorno do tênis pode estar tingido pela aura
 PART_ALPHA = 60        # aura com alfa a partir disso forma "partes" que não são divididas entre frames
 PART_MAJORITY = 0.7    # parte vai inteira para um frame se 70% dela já for dele
 FX_SCALE_REL = 1.1     # efeito um pouco maior que a escala do personagem
+LEGS_FRACTION = 0.35   # modo opaco: parte de baixo do corpo usada para separar os frames
 
 
 def luminance(arr):
@@ -64,14 +66,49 @@ def split_frames(alpha, min_gap=10, min_width=40):
     return [r for r in merged if r[1] - r[0] >= min_width]
 
 
-def split_by_bodies(body, alpha):
+def _label_by_legs(body):
+    """Modo opaco: os frames são separados pelas pernas (a parte de baixo, sempre bem separada);
+    cada pedaço conectado do corpo vai para o frame das pernas que ele toca. Pedaço solto que
+    não chega nas pernas (onda sonora, fio de cabelo) fica sem dono e segue o vizinho depois."""
+    rows = np.nonzero(body.any(axis=1))[0]
+    top, ground = rows.min(), rows.max()
+    legs_from = ground - int((ground - top) * LEGS_FRACTION)
+    legs = np.zeros_like(body)
+    legs[legs_from:] = body[legs_from:]
+    bodies = split_frames(legs.astype(np.uint8) * 255)
+    column_frame = np.zeros(body.shape[1], dtype=np.int32)
+    for i, (x0, x1) in enumerate(bodies, start=1):
+        column_frame[x0:x1] = i
+    parts, count = ndimage.label(body, structure=np.ones((3, 3)))
+    labels = np.zeros(body.shape, dtype=np.int32)
+    centers = np.array([(x0 + x1) / 2 for x0, x1 in bodies])
+    for idx, box in enumerate(ndimage.find_objects(parts), start=1):
+        region = parts[box] == idx
+        leg_rows = np.arange(box[0].start, box[0].stop) >= legs_from
+        ys, xs = np.nonzero(region & leg_rows[:, None])
+        votes = np.bincount(column_frame[xs + box[1].start], minlength=len(bodies) + 1)
+        votes[0] = 0
+        if votes.max():
+            labels[box][region] = votes.argmax()
+        else:
+            # pedaço solto (onda, projétil): o personagem olha para a direita e solta o efeito
+            # para a frente, então ele é do corpo cujo centro fica logo à esquerda dele
+            center = (box[1].start + box[1].stop) / 2
+            labels[box][region] = max(1, int((centers <= center).sum()))
+    return bodies, labels
+
+
+def split_by_bodies(body, alpha, opaque=False):
     """Acha os corpos (colunas com roupa/contorno) e diz de qual frame é cada pixel.
     Assim a aura de um frame que invade o espaço do vizinho continua no frame certo.
     Retorna (trechos de coluna de cada corpo, mapa dono[y, x] = 1..n)."""
-    bodies = split_frames(body.astype(np.uint8) * 255)
-    labels = np.zeros(body.shape, dtype=np.int32)
-    for i, (x0, x1) in enumerate(bodies, start=1):
-        labels[:, x0:x1][body[:, x0:x1]] = i
+    if opaque:
+        bodies, labels = _label_by_legs(body)
+    else:
+        bodies = split_frames(body.astype(np.uint8) * 255)
+        labels = np.zeros(body.shape, dtype=np.int32)
+        for i, (x0, x1) in enumerate(bodies, start=1):
+            labels[:, x0:x1][body[:, x0:x1]] = i
     # 1) cada pixel vai para o corpo mais próximo
     _, (iy, ix) = ndimage.distance_transform_edt(labels == 0, return_indices=True)
     owner = labels[iy, ix]
@@ -102,24 +139,32 @@ def idle_reference(char):
             "frame": int(size * scale)}
 
 
-def build_character(char, raw_path, out_path):
+def build_character(char, raw_path, out_path, opaque=False):
+    """opaque=True: personagem sem contorno (render 3D); o corpo é a parte 100% opaca da imagem
+    (o remover_fundo deixa efeitos semitransparentes)."""
     ref = idle_reference(char)
     img = Image.open(raw_path).convert("RGBA")
     arr = np.array(img).astype(int)
     alpha = arr[..., 3]
     saturation = arr[..., :3].max(axis=2) - arr[..., :3].min(axis=2)
-    # escuro e sem cor = roupa/contorno; azul-escuro forte de aura não conta
-    dark = (alpha > 200) & (luminance(arr) < DARK_LUM) & (saturation < DARK_SAT)
-    bodies, owner = split_by_bodies(dark, alpha)
+    if opaque:
+        dark = feet = alpha >= 250
+    else:
+        # escuro e sem cor = roupa/contorno; azul-escuro forte de aura não conta
+        dark = (alpha > 200) & (luminance(arr) < DARK_LUM) & (saturation < DARK_SAT)
+        # pés: contorno escuro do tênis; tolera um pouco de cor (a luz da aura tinge o contorno)
+        feet = (alpha > 200) & (luminance(arr) < DARK_LUM) & (saturation < FEET_SAT)
+    bodies, owner = split_by_bodies(dark, alpha, opaque)
 
-    # pés: contorno escuro do tênis; tolera um pouco de cor (a luz da aura tinge o contorno)
-    feet = (alpha > 200) & (luminance(arr) < DARK_LUM) & (saturation < FEET_SAT)
     mine = [feet & (owner == i) for i in range(1, len(bodies) + 1)]
     baseline = int(np.median([np.nonzero(m.any(axis=1))[0].max() for m in mine]))
     back_feet = [np.nonzero(m[baseline - FEET_BAND:baseline + 4].any(axis=0))[0].min() for m in mine]
 
-    last_x0, last_x1 = bodies[-1]
-    last_top = np.nonzero(dark[:, last_x0:last_x1].any(axis=1))[0].min()
+    if opaque:  # as colunas das pernas podem não cobrir a cabeça: usa o que é do último frame
+        last_top = np.nonzero((dark & (owner == len(bodies))).any(axis=1))[0].min()
+    else:
+        last_x0, last_x1 = bodies[-1]
+        last_top = np.nonzero(dark[:, last_x0:last_x1].any(axis=1))[0].min()
     scale = (ref["feet"] - ref["top"]) / (baseline - last_top)
 
     # posição de cada frame em coordenadas do frame padrão do jogo (0,0 = canto do frame normal)
@@ -184,13 +229,14 @@ def build_fx(raw_path, out_path, scale):
 
 
 def main():
-    char_id = sys.argv[1] if len(sys.argv) > 1 else "igor"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    char_id = args[0] if args else "igor"
     char = CHARACTERS_BY_ID[char_id]
     sprites = os.path.join(ROOT, "assets", "images", "Sprites")
     raw = os.path.join(sprites, "raw")
 
     info = build_character(char, os.path.join(raw, f"{char_id}_super_raw.png"),
-                           os.path.join(sprites, f"{char_id}_super.png"))
+                           os.path.join(sprites, f"{char_id}_super.png"), opaque="--opaco" in sys.argv)
     print(f"{char_id}_super.png  ->  rect={info['rect']}  steps={info['steps']}  "
           f"escala={info['scale']:.3f}  impacto~{info['impact']}")
 

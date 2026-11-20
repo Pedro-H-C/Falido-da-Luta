@@ -64,6 +64,29 @@ HIT_COLORS = ((255, 255, 255), (255, 240, 120), (255, 200, 40), (255, 140, 20))
 PARRY_COLORS = ((255, 255, 255), (170, 220, 255), (90, 170, 255))
 PARRY_TEXT_COLOR = (140, 210, 255)
 
+# SUPER SÔNICO (Zuzu): tudo treme
+MULTI_HITSTOP_FRAMES = 3     # congelamento de cada acerto do meio da rajada
+SONIC_RING_EVERY = 3         # frames entre uma onda sonora e outra
+SONIC_RING_TIME = 36         # por quanto tempo saem ondas depois do estouro
+SONIC_RING_SPEED = 15        # px por frame
+SONIC_RING_LIFE = 44
+SONIC_RING_SPAN = 0.95       # meia abertura do arco da onda (radianos)
+SONIC_AFTER = 70             # frames que o efeito ainda dura depois da última onda
+SONIC_MAGENTA = (255, 70, 200)   # franjas da onda (separação de cores)
+SONIC_CYAN = (70, 230, 255)
+QUAKE_MAX = 14               # px do tremor da tela INTEIRA (com o HUD) no máximo
+QUAKE_CHARGE = 0.55          # até onde o tremor sobe enquanto o SUPER carrega
+QUAKE_DECAY = 0.965
+ZOOM_DECAY = 0.92
+CHROMA_DECAY = 0.85
+RIPPLE_DECAY = 0.975
+RIPPLE_STRIP = 6             # altura das faixas do cenário ondulando
+CUTIN_H = 170                # altura da faixa cinematográfica
+ROOF_Y = (70, 135)           # de onde cai a poeira do teto
+FLOOR_Y = (440, 596)         # onde pulam as pedrinhas do chão
+DEBRIS_COLORS = ((150, 132, 112), (118, 108, 96), (92, 82, 72), (175, 160, 140))
+DUST_COLORS = ((214, 208, 196), (190, 184, 172), (160, 152, 140))
+
 # HUD
 STAMINA_COLOR = (70, 210, 110)
 STAMINA_LOW_COLOR = (230, 140, 40)   # abaixo do custo do dash
@@ -105,6 +128,17 @@ flash_overlay.fill(WHITE)
 # Tela escura do SUPER (fica atrás dos lutadores)
 dim_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
 dim_overlay.fill((12, 6, 24))
+# Camada transparente das ondas sonoras (limpa e redesenhada a cada frame)
+sonic_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+# Câmera do SUPER sônico: superfícies criadas uma vez só (criar/copiar/pintar a tela inteira
+# todo frame custa caro; blit é quase de graça). Cabem até 30% de zoom.
+POST_SIZE = (int(SCREEN_WIDTH * 1.3), int(SCREEN_HEIGHT * 1.3))
+post_frame = pygame.Surface(POST_SIZE).convert()
+post_red = pygame.Surface(POST_SIZE).convert()
+red_mask = pygame.Surface(POST_SIZE).convert()
+red_mask.fill((255, 0, 0))
+cyan_mask = pygame.Surface(POST_SIZE).convert()
+cyan_mask.fill((0, 255, 255))
 # Faixa escura atrás dos letreiros grandes (NOCAUTE!, PRONTO!)
 banner_band = pygame.Surface((SCREEN_WIDTH, 200), pygame.SRCALPHA)
 banner_band.fill((0, 0, 0, 130))
@@ -420,6 +454,56 @@ class SpriteAnim:
         self.age = 0
 
 
+class SonicRing:
+    """Onda sonora: arco grosso que cresce a partir da cabeça, com franjas magenta e ciano.
+    span = meia abertura do arco; com span >= pi vira um anel completo."""
+    __slots__ = ("x", "y", "angle", "span", "speed", "width", "age", "life", "color")
+
+    def __init__(self, x, y, angle, color, span=SONIC_RING_SPAN, speed=SONIC_RING_SPEED,
+                 width=12, life=SONIC_RING_LIFE):
+        self.x, self.y = x, y
+        self.angle, self.span = angle, span
+        self.speed, self.width = speed, width
+        self.color = color
+        self.age = 0
+        self.life = life
+
+
+class GroundRing:
+    """Anel achatado no chão (o chão vibrando em volta dos pés)."""
+    __slots__ = ("x", "y", "color", "age", "life", "size")
+
+    def __init__(self, x, y, color, size=280, life=34):
+        self.x, self.y = x, y
+        self.color = color
+        self.size = size
+        self.age = 0
+        self.life = life
+
+
+class Debris:
+    """Pedrinha que pula do chão (quica uma vez) ou poeira que cai do teto (floor=None)."""
+    __slots__ = ("x", "y", "vx", "vy", "gravity", "floor", "life", "max_life", "size", "color", "bounced")
+
+    def __init__(self, x, y, vx, vy, gravity, floor, life, size, color):
+        self.x, self.y, self.vx, self.vy = x, y, vx, vy
+        self.gravity = gravity
+        self.floor = floor
+        self.life = self.max_life = life
+        self.size = size
+        self.color = color
+        self.bounced = False
+
+
+def arc_points(cx, cy, radius, width, angle, span, steps=20):
+    """Polígono de um arco grosso (pedaço de anel) em volta de (cx, cy)."""
+    outer, inner = radius + width / 2, max(1.0, radius - width / 2)
+    angles = [angle - span + 2 * span * i / steps for i in range(steps + 1)]
+    points = [(cx + math.cos(a) * outer, cy + math.sin(a) * outer) for a in angles]
+    points += [(cx + math.cos(a) * inner, cy + math.sin(a) * inner) for a in reversed(angles)]
+    return points
+
+
 def star_points(cx, cy, outer, inner, points, angle):
     pts = []
     for i in range(points * 2):
@@ -430,7 +514,11 @@ def star_points(cx, cy, outer, inner, points, angle):
 
 
 class Effects:
-    """Faíscas, tremor de tela, clarão, hitstop e câmera lenta de uma luta."""
+    """Faíscas, tremor de tela, clarão, hitstop e câmera lenta de uma luta.
+
+    Além do tremor do cenário (shake), há a "câmera" do SUPER sônico, aplicada na tela pronta
+    (post_process): tremor da tela inteira com o HUD, zoom no ponto de foco e separação de cores.
+    """
 
     def __init__(self):
         self.reset()
@@ -440,6 +528,12 @@ class Effects:
         self.impacts = []
         self.popups = []
         self.anims = []
+        self.rings = []         # ondas sonoras
+        self.ground_rings = []
+        self.debris = []        # pedrinhas do chão e poeira do teto
+        self.sonic = None       # rajada sônica em andamento
+        self.combo = 0          # acertos da rajada (contador na tela)
+        self.cutin = None       # faixa cinematográfica do SUPER
         self.hitstop = 0        # frames com o jogo congelado
         self.slowmo = 0         # frames restantes de câmera lenta
         self.slow_acc = 0.0
@@ -449,6 +543,14 @@ class Effects:
         self.shake_power = 0
         self.shake_frames = 0
         self.shake_total = 1
+        self.quake = 0.0        # tremor da tela inteira, com o HUD (0..1)
+        self.quake_build = False
+        self.quake_xy = (0, 0)
+        self.zoom = 0.0         # zoom extra da câmera (0.1 = 10%)
+        self.focus = (SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
+        self.chroma = 0.0       # separação de cores (px)
+        self.ripple = 0.0       # cenário ondulando (0..1)
+        self.ripple_t = 0
 
     def popup(self, text, color, x, y, font=score_font):
         img = render_text(text, font, color)
@@ -483,6 +585,16 @@ class Effects:
             self.impacts.append(Impact(x, y, 90, event.color, star=False, life=16))
             self.impacts.append(Impact(x, y, 50, WHITE, star=False, life=10))
             self._shake(6, 12)
+        elif event.kind == "multi":
+            # acerto do meio da rajada sônica: rápido, mas cada um sacode mais a tela
+            self.hitstop = max(self.hitstop, MULTI_HITSTOP_FRAMES)
+            self.combo += 1
+            self._burst(x, y, event.direction, self.palette(event.color), 12, (3, 10), 1.1)
+            self.impacts.append(Impact(x, y, 44, event.color or WHITE, star=False, life=10))
+            self.quake = min(1.0, self.quake + 0.25)
+            self.chroma = max(self.chroma, 4.0)
+            self.zoom = min(0.16, self.zoom + 0.015)
+            self.popup(str(self.combo), WHITE, x + random.randint(-24, 24), y - 70)
         else:
             heavy = event.attack_type >= 2
             is_super = event.attack_type == SUPER
@@ -491,6 +603,15 @@ class Effects:
                         (4, 11 + 5 * heavy + 6 * is_super), 0.9 + 0.6 * is_super)
             self.impacts.append(Impact(x, y, 46 + 24 * heavy + 40 * is_super, WHITE, star=True))
             self._shake(3 + 3 * heavy + 5 * is_super, 8 + 6 * heavy + 10 * is_super)
+            if is_super and self.sonic is not None:
+                # último acerto da rajada: o maior de todos
+                self.combo += 1
+                self.popup(f"{self.combo} ACERTOS!", event.color or YELLOW, x, y - 100, menu_font)
+                self.rings.append(SonicRing(x, y, 0.0, WHITE, span=math.pi, speed=22, width=14, life=26))
+                self.quake = 1.0
+                self.chroma = max(self.chroma, 10.0)
+                self.zoom = min(0.18, self.zoom + 0.06)
+                self.flash = max(self.flash, 120)
         if event.ko:
             self.hitstop = KO_HITSTOP_FRAMES
             self.slowmo = SLOWMO_FRAMES
@@ -502,18 +623,51 @@ class Effects:
 
     def on_super_start(self, fighter):
         """Congela o jogo com a tela escura enquanto o lutador junta energia."""
-        self.hitstop = max(self.hitstop, SUPER_FREEZE_FRAMES)
+        data = fighter.super_data or {}
+        freeze = data.get("freeze", SUPER_FREEZE_FRAMES)
+        self.hitstop = max(self.hitstop, freeze)
         self.dim = SUPER_DIM_ALPHA
-        self.dim_hold = SUPER_FREEZE_FRAMES
+        self.dim_hold = freeze
         cx, cy = fighter.rect.centerx, fighter.rect.centery
         self.impacts.append(Impact(cx, cy, 190, fighter.super_color, star=False, life=24))
         self.impacts.append(Impact(cx, cy, 120, WHITE, star=False, life=16))
         self._burst(cx, cy, 1, self.palette(fighter.super_color), 18, (3, 9), math.pi)
         self.popup("SUPER!", YELLOW, cx, fighter.rect.y - 60, menu_font)
         self._shake(3, 10)
+        if "cutin" in data:
+            self.start_cutin(fighter, data, freeze)
+        if fighter.sonic:
+            # o chão começa a tremer já na carga, cada vez mais forte até o estouro
+            self.quake = max(self.quake, 0.12)
+            self.quake_build = True
+            self.focus = (cx, cy)
 
-    def on_super_impact(self, fighter):
+    def start_cutin(self, fighter, data, frames):
+        """Faixa cinematográfica: rosto de quem soltou o SUPER e o nome do golpe, cruzando a tela."""
+        cut = data["cutin"]
+        face = fighter.animation_list[7][cut["frame"]].subsurface(pygame.Rect(cut["box"]))
+        scale = CUTIN_H * 1.25 / face.get_height()
+        portrait = pygame.transform.smoothscale(face, (round(face.get_width() * scale), round(face.get_height() * scale)))
+        if fighter.flip:
+            portrait = pygame.transform.flip(portrait, True, False)
+        color = fighter.super_color
+        name = data.get("name", "SUPER")
+        front = render_text(name, title_font, WHITE)
+        name_img = pygame.Surface((front.get_width() + 6, front.get_height() + 6), pygame.SRCALPHA)
+        name_img.blit(render_text(name, title_font, color), (6, 6))
+        name_img.blit(front, (0, 0))
+        lines = [[random.uniform(0, SCREEN_WIDTH), random.uniform(4, CUTIN_H - 4), random.uniform(80, 280),
+                  random.uniform(28, 60), random.choice((1, 1, 2, 3)),
+                  random.choice(((255, 255, 255, 150), (*color, 170), (255, 255, 255, 70)))] for _ in range(30)]
+        self.cutin = {"portrait": portrait, "name": name_img, "color": color,
+                      "label": render_text(fighter.name.upper(), score_font, color),
+                      "side": -1 if fighter.flip else 1, "life": frames, "max_life": frames, "lines": lines}
+
+    def on_super_impact(self, fighter, target=None):
         """Frame de impacto do SUPER: onda de choque (sprite do personagem ou genérica)."""
+        if fighter.sonic:
+            self.start_sonic(fighter, target)
+            return
         direction = -1 if fighter.flip else 1
         ground = fighter.rect.bottom
         frames = get_super_fx(fighter.character["id"])
@@ -526,20 +680,68 @@ class Effects:
                 frames = [pygame.transform.flip(frame, True, False) for frame in frames]
                 x -= width
             self.anims.append(SpriteAnim(frames, x, ground + rise - fx["ground"], fx["frame_ticks"]))
-        elif fighter.super_data:
-            # sprite próprio sem efeito separado (a aura já está no desenho): estouro no punho
-            px, py = fighter.rect.centerx + direction * 70, fighter.rect.y + 20
+        elif fighter.super_data and "impact" in fighter.super_data:
+            # sprite próprio sem efeito separado (a aura já está no desenho): estouro no ponto do golpe
+            front, height = fighter.super_data["impact"]
+            px, py = fighter.rect.centerx + direction * front, ground - height
             self.impacts.append(Impact(px, py, 120, fighter.super_color, star=False, life=18))
             self._burst(px, py, direction, self.palette(fighter.super_color), 24, (5, 14), 0.7,
                         angle=-math.pi / 2 + direction * 0.5)
-        else:
-            # SUPER genérico: explosões douradas correndo pelo chão até o alcance do golpe
+        if not frames and (not fighter.super_data or fighter.super_data.get("ground_wave")):
+            # explosões correndo pelo chão até o alcance do golpe (também o SUPER genérico)
             reach = fighter.attack_reach(SUPER)
             for i in range(5):
                 px = fighter.rect.centerx + direction * (40 + i * reach // 5)
-                self.impacts.append(Impact(px, ground - 30, 50 + i * 10, (255, 200, 60), star=True, life=12 + i * 3))
-                self._burst(px, ground - 20, direction, HIT_COLORS, 6, (3, 9), 1.2)
+                self.impacts.append(Impact(px, ground - 30, 50 + i * 10, fighter.super_color,
+                                           star=not fighter.super_data, life=12 + i * 3))
+                self._burst(px, ground - 20, direction, self.palette(fighter.super_color), 6, (3, 9), 1.2)
         self._shake(6, 16)
+
+    def start_sonic(self, fighter, target):
+        """ESTOURO: ondas sonoras saindo da cabeça na direção do oponente, e o mundo inteiro treme."""
+        direction = -1 if fighter.flip else 1
+        front, height = fighter.sonic["origin"]
+        x = fighter.rect.centerx + direction * front
+        y = fighter.rect.bottom - height
+        aim = 0.0
+        if target is not None:  # inclina as ondas para o tronco do oponente (com limite)
+            reach = max(60, abs(target.rect.centerx - x))
+            aim = max(-0.6, min(0.6, math.atan2(target.rect.centery - y, reach)))
+        angle = aim if direction > 0 else math.pi - aim
+        color = fighter.super_color
+        self.sonic = {"x": x, "y": y, "angle": angle, "color": color, "age": 0,
+                      "feet": (fighter.rect.centerx, fighter.rect.bottom)}
+        self.combo = 0
+
+        self.rings.append(SonicRing(x, y, angle, WHITE, span=math.pi, speed=26, width=16, life=30))
+        self.rings.append(SonicRing(x, y, angle, color, span=math.pi, speed=19, width=12, life=36))
+        self.rings.append(SonicRing(x, y, angle, WHITE, speed=SONIC_RING_SPEED + 4, width=18))
+        self.impacts.append(Impact(x, y, 150, WHITE, star=False, life=16))
+        self.impacts.append(Impact(x, y, 90, color, star=False, life=12))
+        self._burst(x, y, direction, self.palette(color), 30, (6, 16), 0.9, angle=angle)
+        self.ground_rings.append(GroundRing(*self.sonic["feet"], color, size=420, life=40))
+        self.flash = max(self.flash, 110)
+        self.quake_build = False
+        self.quake = 1.0
+        self.zoom = max(self.zoom, 0.12)
+        self.chroma = max(self.chroma, 10.0)
+        self.ripple = 1.0
+        if target is not None:  # câmera entre a cabeça dele e o oponente
+            self.focus = ((x + target.rect.centerx) / 2, (y + target.rect.centery) / 2)
+        else:
+            self.focus = (x, y)
+        self._shake(10, 30)
+        self.spawn_rocks(fighter.rect.centerx, 46)
+
+    def spawn_rocks(self, center_x, count):
+        """Pedrinhas pulando do chão da arena inteira (mais alto perto de quem estourou)."""
+        for _ in range(count):
+            x = random.uniform(0, SCREEN_WIDTH)
+            floor = random.uniform(*FLOOR_Y)
+            near = 1 - min(1.0, abs(x - center_x) / SCREEN_WIDTH)
+            self.debris.append(Debris(x, floor, random.uniform(-1.5, 1.5), -random.uniform(4, 11) * (0.5 + near),
+                                      0.45, floor, random.randint(50, 90), random.randint(2, 5),
+                                      random.choice(DEBRIS_COLORS)))
 
     def on_land(self, fighter):
         """Quem foi lançado pelo SUPER aéreo bate no chão."""
@@ -588,6 +790,76 @@ class Effects:
             self.dim_hold -= 1
         else:
             self.dim = max(0, self.dim - 10)
+        self._update_sonic()
+        self._update_camera()
+        self._update_cutin()
+
+    def _update_sonic(self):
+        for ring in self.rings:
+            ring.age += 1
+        self.rings = [r for r in self.rings if r.age < r.life]
+        for ring in self.ground_rings:
+            ring.age += 1
+        self.ground_rings = [r for r in self.ground_rings if r.age < r.life]
+        for d in self.debris:
+            d.vy += d.gravity
+            d.x += d.vx
+            d.y += d.vy
+            d.life -= 1
+            if d.floor is not None and d.y >= d.floor and d.vy > 0:  # pedrinha quica uma vez e para
+                d.y = d.floor
+                d.vy = -d.vy * 0.35 if not d.bounced else 0
+                d.vx *= 0.6
+                d.bounced = True
+        self.debris = [d for d in self.debris if d.life > 0]
+
+        sonic = self.sonic
+        if sonic is None:
+            return
+        sonic["age"] += 1
+        age = sonic["age"]
+        if age <= SONIC_RING_TIME:
+            if age % SONIC_RING_EVERY == 0:  # onda sim, onda não: uma branca, uma da cor do golpe
+                color = WHITE if (age // SONIC_RING_EVERY) % 2 else sonic["color"]
+                self.rings.append(SonicRing(sonic["x"], sonic["y"], sonic["angle"], color))
+            if age % 9 == 0:
+                self.ground_rings.append(GroundRing(*sonic["feet"], sonic["color"]))
+        elif age > SONIC_RING_TIME + SONIC_AFTER:
+            self.sonic = None
+
+    def _update_camera(self):
+        """Tremor da tela inteira, zoom, separação de cores e cenário ondulando (decaem sozinhos)."""
+        if self.quake_build:
+            self.quake = min(QUAKE_CHARGE, self.quake + 0.008)
+        else:
+            self.quake = self.quake * QUAKE_DECAY if self.quake > 0.02 else 0.0
+        self.zoom = self.zoom * ZOOM_DECAY if self.zoom > 0.002 else 0.0
+        self.chroma = self.chroma * CHROMA_DECAY if self.chroma > 0.5 else 0.0
+        self.ripple = self.ripple * RIPPLE_DECAY if self.ripple > 0.02 else 0.0
+        self.ripple_t += 1
+        # sorteado aqui (e não no desenho) para a tela não tremer com o jogo pausado
+        amp = QUAKE_MAX * self.quake
+        self.quake_xy = (random.uniform(-amp, amp), random.uniform(-amp, amp) * 0.7) if amp >= 0.5 else (0, 0)
+        # com a terra tremendo, cai poeira do teto da quadra
+        if self.quake > 0.15:
+            for _ in range(int(self.quake * 3 + random.random())):
+                self.debris.append(Debris(random.uniform(0, SCREEN_WIDTH), random.uniform(*ROOF_Y),
+                                          random.uniform(-0.3, 0.3), random.uniform(0.3, 1.6), 0.05, None,
+                                          random.randint(70, 110), random.randint(1, 3), random.choice(DUST_COLORS)))
+
+    def _update_cutin(self):
+        cutin = self.cutin
+        if cutin is None:
+            return
+        cutin["life"] -= 1
+        for line in cutin["lines"]:  # linhas de velocidade correm contra o retrato
+            line[0] -= cutin["side"] * line[3]
+            if line[0] < -line[2]:
+                line[0] += SCREEN_WIDTH + line[2]
+            elif line[0] > SCREEN_WIDTH:
+                line[0] -= SCREEN_WIDTH + line[2]
+        if cutin["life"] <= 0:
+            self.cutin = None
 
     def shake_offset(self):
         if self.shake_frames <= 0:
@@ -599,6 +871,11 @@ class Effects:
         ox, oy = offset
         for anim in self.anims:
             screen.blit(anim.frames[anim.age // anim.ticks], (anim.x + ox, anim.y + oy))
+        for d in self.debris:
+            fade = min(1.0, d.life / 20)
+            color = tuple(int(c * (0.4 + 0.6 * fade)) for c in d.color) if d.floor is None else d.color
+            pygame.draw.circle(screen, color, (d.x + ox, d.y + oy), d.size)
+        self._draw_sonic(ox, oy)
         for impact in self.impacts:
             t = 1 - impact.life / impact.max_life  # 0 -> 1
             cx, cy = impact.x + ox, impact.y + oy
@@ -615,6 +892,116 @@ class Effects:
         for popup in self.popups:
             popup.image.set_alpha(min(255, popup.life * 20))
             screen.blit(popup.image, popup.image.get_rect(center=(popup.x + ox, popup.y + oy)))
+
+    def _draw_sonic(self, ox, oy):
+        """Feixe, ondas sonoras e anéis no chão, numa camada transparente."""
+        sonic = self.sonic
+        beam = sonic is not None and sonic["age"] <= SONIC_RING_TIME
+        if not (self.rings or self.ground_rings or beam):
+            return
+        sonic_overlay.fill((0, 0, 0, 0))
+        if beam:  # cone de som saindo da cabeça, pulsando
+            pulse = 0.6 + 0.4 * math.sin(sonic["age"] * 0.9)
+            x, y, angle = sonic["x"], sonic["y"], sonic["angle"]
+            for span, alpha, color in ((0.55, 34, WHITE), (0.28, 60, sonic["color"])):
+                points = [(x, y)] + [(x + math.cos(angle + s) * 1400, y + math.sin(angle + s) * 1400)
+                                     for s in (-span, span)]
+                pygame.draw.polygon(sonic_overlay, (*color, int(alpha * pulse)), points)
+        for ring in self.ground_rings:
+            t = ring.age / ring.life
+            radius = ring.size * (0.15 + 0.85 * t)
+            rect = pygame.Rect(0, 0, radius * 2, radius * 0.24)
+            rect.center = (ring.x, ring.y)
+            pygame.draw.ellipse(sonic_overlay, (*ring.color, int(200 * (1 - t))), rect, max(1, int(5 * (1 - t))))
+        for ring in self.rings:
+            t = ring.age / ring.life
+            radius = 16 + ring.speed * ring.age
+            width = max(2.0, ring.width * (1 - t))
+            alpha = int(255 * (1 - t) ** 1.3)
+            # franja magenta atrás, ciano na frente e a onda por cima: parece som distorcendo
+            for shift, color, thick in ((-4, SONIC_MAGENTA, 1.0), (4, SONIC_CYAN, 1.0), (0, ring.color, 0.7)):
+                cx = ring.x + math.cos(ring.angle) * shift
+                cy = ring.y + math.sin(ring.angle) * shift
+                if ring.span >= math.pi:
+                    pygame.draw.circle(sonic_overlay, (*color, alpha), (cx, cy), radius, max(1, int(width * thick)))
+                else:
+                    pygame.draw.polygon(sonic_overlay, (*color, alpha),
+                                        arc_points(cx, cy, radius, width * thick, ring.angle, ring.span))
+        screen.blit(sonic_overlay, (ox, oy))
+
+    def draw_cutin(self):
+        """Faixa cinematográfica durante o congelamento do SUPER (abre, segura e fecha)."""
+        cutin = self.cutin
+        if cutin is None:
+            return
+        t = 1 - cutin["life"] / cutin["max_life"]  # 0 -> 1
+        opening = 1 - (1 - min(1.0, t / 0.15)) ** 3
+        closing = max(0.0, (t - 0.85) / 0.15)
+        height = int(CUTIN_H * opening * (1 - closing ** 2))
+        if height < 2:
+            return
+        top = SCREEN_HEIGHT // 2 - height // 2
+        color, side = cutin["color"], cutin["side"]
+        band = pygame.Surface((SCREEN_WIDTH, height), pygame.SRCALPHA)
+        band.fill((14, 8, 30, 225))
+        pygame.draw.rect(band, (*color, 45), (0, height // 3, SCREEN_WIDTH, height // 3))
+        for x, y, length, _, thick, line_color in cutin["lines"]:
+            y = int(y * height / CUTIN_H)
+            pygame.draw.line(band, line_color, (x, y), (x + length, y), thick)
+        screen.blit(band, (0, top))
+
+        screen.set_clip(pygame.Rect(0, top, SCREEN_WIDTH, height))
+        # rosto entra pelo lado de quem soltou o SUPER e continua andando devagar
+        portrait = cutin["portrait"]
+        width = portrait.get_width()
+        slide = 1 - (1 - min(1.0, t / 0.22)) ** 3
+        if side > 0:
+            px = -width + (width + 30) * slide + 40 * t
+        else:
+            px = SCREEN_WIDTH - (width + 30) * slide - 40 * t
+        screen.blit(portrait, (px, SCREEN_HEIGHT // 2 - portrait.get_height() // 2 + 12))
+        # nome do golpe entra pelo outro lado, um pouco depois
+        name, label = cutin["name"], cutin["label"]
+        slide = 1 - (1 - min(1.0, max(0.0, (t - 0.08) / 0.22))) ** 3
+        if side > 0:
+            target = SCREEN_WIDTH - name.get_width() - 40
+            nx = SCREEN_WIDTH + (target - SCREEN_WIDTH) * slide - 30 * t
+        else:
+            nx = -name.get_width() + (40 + name.get_width()) * slide + 30 * t
+        ny = SCREEN_HEIGHT // 2 - name.get_height() // 2 + 14
+        screen.blit(label, (nx + 4, ny - label.get_height() + 10))
+        screen.blit(name, (nx, ny))
+        screen.set_clip(None)
+        for y, line_color in ((top, color), (top + height - 3, color), (top + 4, WHITE), (top + height - 6, WHITE)):
+            pygame.draw.line(screen, line_color, (0, y), (SCREEN_WIDTH, y), 3 if line_color == color else 1)
+
+    def post_process(self):
+        """Câmera do SUPER sônico na tela pronta: tremor geral (com o HUD), zoom e separação de cores."""
+        amp = QUAKE_MAX * self.quake
+        shift = int(self.chroma)
+        qx, qy = round(self.quake_xy[0]), round(self.quake_xy[1])
+        if self.zoom <= 0.004 and shift < 1:
+            if qx or qy:  # só tremor: rolar a tela é quase de graça (a borda repete uns pixels)
+                screen.scroll(qx, qy)
+            return
+        # zoom mínimo para o tremor e a separação de cores nunca mostrarem a borda da tela
+        zoom = min(1.3, max(1 + self.zoom, 1 + 2 * (amp + shift + 2) / SCREEN_HEIGHT))
+        width, height = round(SCREEN_WIDTH * zoom), round(SCREEN_HEIGHT * zoom)
+        frame = post_frame.subsurface((0, 0, width, height))
+        pygame.transform.scale(screen, (width, height), frame)  # sem suavizar: rápido, e tremendo ninguém nota
+        fx, fy = self.focus  # o ponto de foco fica parado na tela enquanto o resto cresce em volta
+        x = min(-shift, max(SCREEN_WIDTH - width + shift, round(fx - fx * zoom) + qx))
+        y = min(0, max(SCREEN_HEIGHT - height, round(fy - fy * zoom) + qy))
+        if shift < 1:
+            screen.blit(frame, (x, y))
+            return
+        # separação de cores: vermelho para um lado, ciano para o outro
+        red = post_red.subsurface((0, 0, width, height))
+        red.blit(frame, (0, 0))
+        red.blit(red_mask, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+        frame.blit(cyan_mask, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+        screen.blit(frame, (x + shift, y))
+        screen.blit(red, (x - shift, y), special_flags=pygame.BLEND_RGB_ADD)
 
     def draw_dim(self):
         if self.dim > 0:
@@ -713,7 +1100,7 @@ class Match:
                 if signal == "super_start":
                     self.effects.on_super_start(attacker)
                 elif signal == "super_impact":
-                    self.effects.on_super_impact(attacker)
+                    self.effects.on_super_impact(attacker, defender)
                 elif signal == "land":
                     self.effects.on_land(attacker)
         f1.update()
@@ -736,10 +1123,25 @@ class Match:
                 self.start_round()
 
     # ---------- desenho ----------
+    def draw_background(self, offset):
+        """Cenário; durante o SUPER sônico ele ondula em faixas, como se o ar vibrasse."""
+        ox, oy = offset
+        fx = self.effects
+        if fx.ripple <= 0:
+            screen.blit(bg_image, (-SHAKE_MARGIN + ox, -SHAKE_MARGIN + oy))
+            return
+        amp = (SHAKE_MARGIN - 2) * min(1.0, fx.ripple)
+        focus_y = fx.focus[1]
+        width = bg_image.get_width()
+        for y in range(-SHAKE_MARGIN, SCREEN_HEIGHT + SHAKE_MARGIN, RIPPLE_STRIP):
+            wave = math.sin((y - focus_y) * 0.045 - fx.ripple_t * 0.55)
+            screen.blit(bg_image, (-SHAKE_MARGIN + ox + round(amp * wave), y + oy),
+                        (0, y + SHAKE_MARGIN, width, RIPPLE_STRIP))
+
     def draw(self):
         offset = self.effects.shake_offset()
         ox, oy = offset
-        screen.blit(bg_image, (-SHAKE_MARGIN + ox, -SHAKE_MARGIN + oy))
+        self.draw_background(offset)
         self.effects.draw_dim()
 
         ground = SCREEN_HEIGHT - GROUND_MARGIN
@@ -753,11 +1155,13 @@ class Match:
         for f in sorted(self.fighters, key=lambda fighter: fighter.attacking):
             f.draw(screen, offset)
         self.effects.draw(offset)
+        self.effects.draw_cutin()
 
         self.draw_hud()
         if not self.finished:
             self.draw_banners()
         self.effects.draw_flash()
+        self.effects.post_process()  # por último: o tremor do SUPER sônico sacode até o HUD
 
     def draw_hud(self):
         for side, f in enumerate(self.fighters):

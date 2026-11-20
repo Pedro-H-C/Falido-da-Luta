@@ -57,6 +57,14 @@ SUPER_COLOR_DEFAULT = (255, 200, 60)
 JUGGLE_PULL = 0.3          # quanto o oponente lançado é puxado por frame até ficar na frente
 JUGGLE_MAX_WAIT = 45       # frames no máximo esperando o golpe no alto (segurança)
 SUPER_AIR_POP = -16        # o golpe final ainda joga o oponente um pouco mais para cima
+# SUPER sônico (personagens com "sonic"): uma rajada de vários acertos seguidos
+SONIC_TICK_SHARE = 0.09    # cada acerto do meio da rajada tira ~9% do dano total; o último leva o resto
+SONIC_TICK_PUSH = 3        # empurrão dos acertos do meio (o oponente fica dentro da rajada)
+SONIC_FINAL_POP = -13      # o último acerto arremessa o oponente pelos ares
+TREMOR_HIT = 18            # frames vibrando de quem leva um acerto da rajada
+TREMOR_HIT_AMP = 7
+TREMOR_SELF = 45           # quem solta a rajada também treme
+TREMOR_SELF_AMP = 3
 
 # Velocidade (ms por frame) de cada animação; o resto usa 100.
 # O SUPER com sprite próprio usa o "frame_ms" do personagem.
@@ -88,11 +96,20 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #   frame_ms -> duração de cada frame; o golpe acerta no frame do meio (len // 2)
 #   range    -> alcance do SUPER
 #   color    -> cor dos efeitos (anéis, faíscas)
+#   impact   -> (à frente do centro, acima do chão) onde estoura o impacto quando não há "fx"
+#   ground_wave -> explosões correndo pelo chão até o alcance do golpe
 #   fx       -> efeito desenhado à frente no impacto: origin = (à frente do centro, acima do chão)
 #               onde fica o canto esquerdo do efeito na linha "ground" da imagem
 #   launch   -> SUPER aéreo: no frame "frame" uma explosão lança os dois "rise" px para cima, com o
 #               oponente a "gap" px na frente; o golpe (frame do meio) acerta no alto. "damage" é o
 #               dano do lançamento (sai do dano total do SUPER). Se o lançamento errar, o SUPER sai no chão.
+#   damage   -> dano total do SUPER (sem isso, o de ATTACKS)
+#   impact_frame -> frame em que o golpe acerta (sem isso, o do meio)
+#   freeze   -> frames de congelamento no começo (sem isso, o padrão do main)
+#   name, cutin -> faixa cinematográfica no congelamento: nome do golpe e recorte (x, y, largura,
+#               altura) do rosto no frame "frame" do SUPER
+#   sonic    -> rajada sônica: "hits" acertos, um a cada "every" frames; as ondas saem de "origin"
+#               (à frente do centro, acima do chão)
 # Sem "super", o SUPER usa o golpe forte com brilho dourado.
 CHARACTERS = [
     {
@@ -127,6 +144,7 @@ CHARACTERS = [
             "frame_ms": (90, 90, 210, 170, 150, 120, 130),
             "range": 2.0,
             "color": (90, 170, 255),
+            "impact": (70, 280),      # punho do uppercut, lá em cima
             "launch": {"frame": 2, "rise": 150, "gap": 125, "damage": 6},
         },
     },
@@ -138,6 +156,15 @@ CHARACTERS = [
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         "stats": {"max_health": 90, "speed": 6, "jump_vel": -25, "dmg_mult": 1.25, "stamina": 100},
         "tagline": "Muito forte, mas lento",
+        "super": {
+            "sheet_path": "assets/images/Sprites/manko_super.png",
+            "rect": (18, 7, 439, 383),
+            "frame_ms": (90, 90, 170, 160, 140, 130, 130),
+            "range": 2.6,
+            "color": (235, 60, 70),
+            "impact": (40, 15),       # muletada no chão, logo à frente
+            "ground_wave": True,      # explosões correndo pelo chão até o alcance
+        },
     },
     {
         # sheet em resolução dobrada (frames de 500px); escala menor deixa ele ~8% mais alto que os outros
@@ -148,6 +175,31 @@ CHARACTERS = [
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         "stats": {"max_health": 115, "speed": 9, "jump_vel": -31, "dmg_mult": 1.2, "stamina": 100},
         "tagline": "O mais poderoso de todos",
+        "super": {
+            "sheet_path": "assets/images/Sprites/zuzu_super.png",
+            "rect": (119, -64, 332, 436),
+            # orelha incha, vibra, ESTOURO, cabelo voando, orelha volta, tonto
+            "frame_ms": (130, 150, 260, 300, 170, 170),
+            "impact_frame": 2,
+            "range": 4.2,
+            "damage": 32,
+            "color": (160, 120, 255),
+            "freeze": 66,
+            "name": "ESTOURO SÔNICO",
+            "cutin": {"frame": 2, "box": (60, 0, 170, 215)},
+            "sonic": {"origin": (173, 335), "hits": 6, "every": 5},
+        },
+    },
+    {
+        # sheet de 500px como a do Zuzu; escala deixa o corpo do tamanho dos outros (o chapéu sobra)
+        "id": "caio",
+        "name": "Caio",
+        "sheet_path": "assets/images/Sprites/caio.png",
+        "data": [500, 0.72, [112, 66]],
+        "anim_steps": [4, 4, 5, 4, 4, 4, 5],
+        # rápida e o pulo mais alto do elenco, mas com pouca vida
+        "stats": {"max_health": 95, "speed": 9, "jump_vel": -32, "dmg_mult": 1.1, "stamina": 110},
+        "tagline": "Nerd ágil do chapéu voador",
     },
 ]
 CHARACTERS_BY_ID = {char["id"]: char for char in CHARACTERS}
@@ -287,7 +339,9 @@ class Fighter():
         self.super_data = character.get("super")
         self.super_range = (self.super_data or {}).get("range", ATTACKS[SUPER]["range"])
         self.super_color = (self.super_data or {}).get("color", SUPER_COLOR_DEFAULT)
+        self.super_damage = (self.super_data or {}).get("damage", ATTACKS[SUPER]["damage"])
         self.launch = (self.super_data or {}).get("launch")
+        self.sonic = (self.super_data or {}).get("sonic")
         stats = character["stats"]
         self.max_health = stats["max_health"]
         self.speed = stats["speed"]
@@ -336,6 +390,11 @@ class Fighter():
         self.juggled = False           # foi lançado pelo SUPER de alguém (sem controle até cair)
         self.juggle_x = None           # onde ficar (centro) esperando o golpe no alto
         self.juggle_timer = 0
+        self.multi_left = 0            # SUPER sônico: acertos que ainda faltam na rajada
+        self.multi_clock = 0
+        self.tremor = 0                # frames vibrando (sprite treme no lugar)
+        self.tremor_amp = 0
+        self.tremor_xy = (0, 0)
         self.signals = []              # avisos para o main: "super_start", "super_impact", "land"
         self.tick = 0
         self.prev_held = {}            # teclas do frame anterior (para saber o instante do toque)
@@ -367,6 +426,8 @@ class Fighter():
         """Frame em que o golpe atual encosta (no SUPER aéreo, primeiro vem o lançamento)."""
         if self.attack_type == SUPER and self.launch and not self.launch_done:
             return self.launch["frame"]
+        if self.attack_type == SUPER and self.super_data and "impact_frame" in self.super_data:
+            return self.super_data["impact_frame"]
         return len(self.animation_list[self.action]) // 2
 
     def frames_to_impact(self):
@@ -481,7 +542,22 @@ class Fighter():
                 self.attack_hit_done = True
                 if self.attack_type == SUPER:
                     self.signals.append("super_impact")
+                    if self.sonic:  # começa a rajada: este é o 1º acerto, os outros vêm depois
+                        self.multi_left = self.sonic["hits"] - 1
+                        self.multi_clock = self.sonic["every"]
+                        self.tremor, self.tremor_amp = TREMOR_SELF, TREMOR_SELF_AMP
                 hit_event = self.resolve_attack(target) or hit_event
+
+        # SUPER sônico: os outros acertos da rajada, um a cada "every" frames
+        if self.multi_left > 0:
+            if not (self.attacking and self.attack_type == SUPER):
+                self.multi_left = 0  # levou golpe ou acabou a animação
+            else:
+                self.multi_clock -= 1
+                if self.multi_clock <= 0:
+                    self.multi_left -= 1
+                    self.multi_clock = self.sonic["every"]
+                    hit_event = self.resolve_attack(target) or hit_event
 
         # FÍSICA (sempre roda, mesmo sem controle)
         if self.floating():
@@ -814,6 +890,7 @@ class Fighter():
         self.knockback = -direction * PARRY_PUSHBACK
         if self.attack_type == SUPER:
             self.attack_hit_done = True  # o resto do SUPER não acerta mais
+            self.multi_left = 0
         else:
             self.get_stunned()
         return HitEvent("parry", self.attack_type, contact, direction, False)
@@ -827,17 +904,31 @@ class Fighter():
             return self._parried(target, direction, contact)
 
         atk = ATTACKS[self.attack_type]
-        base = atk["damage"]
+        base = self.super_damage if self.attack_type == SUPER else atk["damage"]
+        knockback = atk["knockback"]
+        kind = "hit"
+        sonic = self.attack_type == SUPER and self.sonic
+        if sonic:
+            tick = round(base * SONIC_TICK_SHARE)
+            if self.multi_left > 0:  # acerto do meio da rajada: pouco dano, segura o oponente
+                base, knockback, kind = tick, SONIC_TICK_PUSH, "multi"
+            else:                    # último acerto: o resto do dano e arremessa
+                base -= tick * (self.sonic["hits"] - 1)
+            target.tremor, target.tremor_amp = TREMOR_HIT, TREMOR_HIT_AMP
         if self.super_air:
             base -= self.launch["damage"]  # parte do dano já saiu no lançamento
         damage = max(1, round(base * self.dmg_mult))
-        target.take_hit(damage, atk["knockback"], direction)
+        target.take_hit(damage, knockback, direction, meter=kind == "hit")
         if self.super_air:
             target.vel_y = SUPER_AIR_POP
             target.juggle_x = None
+        if sonic and kind == "hit" and target.alive:
+            target.vel_y = SONIC_FINAL_POP
+            target.jumping = True
+            target.juggled = True  # segura a animação de dano até cair (e levanta poeira)
         self.gain_super(SUPER_GAIN_HIT[self.attack_type])
         color = self.super_color if self.attack_type == SUPER else None
-        return HitEvent("hit", self.attack_type, contact, direction, not target.alive, color)
+        return HitEvent(kind, self.attack_type, contact, direction, not target.alive, color)
 
     def try_launch(self, target, screen_width):
         """Começo do SUPER aéreo: se o oponente está perto, uma explosão lança os dois para cima.
@@ -886,7 +977,8 @@ class Fighter():
         self.frame_index = 0
         self.update_time = pygame.time.get_ticks()
 
-    def take_hit(self, damage, knockback, direction):
+    def take_hit(self, damage, knockback, direction, meter=True):
+        """meter=False: não enche a barra de SUPER (acertos do meio de uma rajada)."""
         self.health = max(0, self.health - damage)
         self.knockback = direction * knockback
         self.attacking = False  # levar golpe interrompe o seu ataque
@@ -898,7 +990,8 @@ class Fighter():
         self.action = 5
         self.frame_index = 0
         self.update_time = pygame.time.get_ticks()
-        self.gain_super(SUPER_GAIN_HURT)
+        if meter:
+            self.gain_super(SUPER_GAIN_HURT)
         self.trail_delay = TRAIL_DELAY
         if self.health == 0:
             self.alive = False
@@ -959,6 +1052,14 @@ class Fighter():
             ghost[4] -= 1
         self.ghosts = [g for g in self.ghosts if g[4] > 0]
 
+        # tremor: sorteado aqui (e não no desenho) para não tremer com o jogo pausado
+        if self.tremor > 0:
+            self.tremor -= 1
+            amp = max(1, round(self.tremor_amp * min(1.0, self.tremor / 10)))
+            self.tremor_xy = (random.randint(-amp, amp), random.randint(-amp, amp) // 2)
+        else:
+            self.tremor_xy = (0, 0)
+
         if self.trail_delay > 0:
             self.trail_delay -= 1
         elif self.health_trail > self.health:
@@ -972,7 +1073,7 @@ class Fighter():
 
     def draw(self, surface, offset=(0, 0)):
         """Desenha o lutador; offset desloca tudo (tremor de tela)."""
-        ox, oy = offset
+        ox, oy = offset[0] + self.tremor_xy[0], offset[1] + self.tremor_xy[1]
 
         # rastro azul do dash
         for gx, gy, image, flip, life in self.ghosts:
