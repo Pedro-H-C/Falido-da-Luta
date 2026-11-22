@@ -65,6 +65,28 @@ TREMOR_HIT = 18            # frames vibrando de quem leva um acerto da rajada
 TREMOR_HIT_AMP = 7
 TREMOR_SELF = 45           # quem solta a rajada também treme
 TREMOR_SELF_AMP = 3
+# SUPER bumerangue (personagens com "boomerang"): o chapéu voa, fura o oponente várias vezes,
+# passa, volta e arrasta o oponente para perto de quem jogou
+HAT_DECEL = 0.9            # velocidade (px/frame) que o chapéu perde por frame indo e ganha voltando
+HAT_MAX_SPEED = 30
+HAT_EDGE = 40              # o centro do chapéu não passa disso da borda da tela
+HAT_LINE = 200             # altura do voo acima do chão (peito do oponente)
+HAT_START_SCALE = 0.6      # sai da mão do tamanho do chapéu na cabeça e cresce...
+HAT_GROW = 8               # ... em tantos frames; chegando na mão encolhe de novo
+HAT_RISE = 260             # voltando, a essa distância da mão começa a subir até ela
+HAT_GRIND_DEPTH = 30       # furando: centro do chapéu a isso do centro do oponente
+HAT_TICK_SHARE = 0.1       # cada furada tira 10% do dano total; a volta leva o resto
+HAT_TICK_PUSH = 3
+HAT_TREMOR = 10
+HAT_TREMOR_AMP = 4
+HAT_PASS = 150             # depois de furar, passa isso além do oponente antes de voltar
+HAT_HOLD = 60              # frames que o oponente fica preso na animação de dano esperando a volta
+HAT_PULL_POP = -9          # a volta levanta o oponente um pouco...
+HAT_PULL_GAP = 170         # ... e arrasta até essa distância de quem jogou
+HAT_DRAG_TIMER = 8         # frames que o oponente ainda vai até o lugar depois de solto
+HAT_RECOVER_EXTRA = 6      # depois de solto, levanta um pouco depois de quem jogou terminar a pose
+HAT_LIFE = 300             # segurança: o chapéu some depois disso
+HAT_TRAIL = 8              # posições guardadas para o rastro
 
 # Velocidade (ms por frame) de cada animação; o resto usa 100.
 # O SUPER com sprite próprio usa o "frame_ms" do personagem.
@@ -77,9 +99,27 @@ CONTROLS = {
         "atk1": pygame.K_n, "atk2": pygame.K_m, "super": pygame.K_COMMA},
 }
 
-# O que o lutador quer fazer neste frame. Vem do teclado (jogador) ou da IA (CPU).
+# Botões segurados num frame. No modo online é só isso que vai pela rede (6 bits por frame):
+# cada computador calcula as intenções abaixo a partir dos botões dos dois jogadores.
+BUTTONS = ("left", "right", "jump", "atk1", "atk2", "super")
+
+# O que o lutador quer fazer neste frame. Vem dos botões (jogador) ou da IA (CPU).
 #   parry -> True só no frame em que tocou para trás | dash -> -1, 0 ou +1
 INTENT_KEYS = ("left", "right", "jump", "parry", "dash", "atk1", "atk2", "super")
+
+
+def keyboard_buttons(*control_sets):
+    """Botões segurados agora no teclado. Com mais de um conjunto de teclas, vale qualquer um."""
+    key = pygame.key.get_pressed()
+    return {name: any(key[controls[name]] for controls in control_sets) for name in BUTTONS}
+
+
+def pack_buttons(held):
+    return sum(1 << i for i, name in enumerate(BUTTONS) if held[name])
+
+
+def unpack_buttons(bits):
+    return {name: bool(bits >> i & 1) for i, name in enumerate(BUTTONS)}
 
 # Golpe que encostou no oponente; o main usa para hitstop, faíscas e tremor de tela.
 #   kind: "hit", "parry" ou "launch" (início do SUPER aéreo) | pos: ponto de contato
@@ -110,6 +150,12 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #               altura) do rosto no frame "frame" do SUPER
 #   sonic    -> rajada sônica: "hits" acertos, um a cada "every" frames; as ondas saem de "origin"
 #               (à frente do centro, acima do chão)
+#   glint    -> brilho de lente no começo: pixel (x, y) do frame 0 do SUPER
+#   boomerang -> o golpe é um objeto que voa e volta (sheet de frames "size" girando). Pixels do
+#               frame do SUPER: "hand" = onde ele está no frame antes do impact_frame (sai dali) e
+#               "catch" = onde fica no frame seguinte (volta para lá). "reach" = distância máxima,
+#               "hits" furadas na ida (uma a cada "every" frames), "box" = hitbox (largura, altura).
+#               O personagem segura o frame impact_frame até o objeto voltar.
 # Sem "super", o SUPER usa o golpe forte com brilho dourado.
 CHARACTERS = [
     {
@@ -119,7 +165,7 @@ CHARACTERS = [
         "data": [250, 1.5, [120, 70]],
         "anim_steps": [4, 6, 5, 6, 5, 4, 5],
         "stats": {"max_health": 110, "speed": 7, "jump_vel": -28, "dmg_mult": 1.15, "stamina": 90},
-        "tagline": "Bruto, forte e lento",
+        "tagline": "Gordo e preguento",
         "super": {
             "sheet_path": "assets/images/Sprites/igor_super.png",
             "rect": (57, -103, 342, 470),
@@ -200,6 +246,26 @@ CHARACTERS = [
         # rápida e o pulo mais alto do elenco, mas com pouca vida
         "stats": {"max_health": 95, "speed": 9, "jump_vel": -32, "dmg_mult": 1.1, "stamina": 110},
         "tagline": "Nerd ágil do chapéu voador",
+        "super": {
+            # montado com: python tools/montar_super.py caio --pecas --projetil
+            # (raw/caio_super_raw.png tem as lentes do 1º frame preenchidas à mão: o reflexo
+            # apagava o contorno dos óculos e o remover_fundo deixava um buraco ali)
+            "sheet_path": "assets/images/Sprites/caio_super.png",
+            "rect": (66, -42, 317, 404),
+            # óculos brilham, gira o chapéu, prepara, arremessa, espera o chapéu, pega, pose
+            "frame_ms": (110, 130, 150, 90, 120, 160, 300),
+            "impact_frame": 4,
+            "range": 6.5,
+            "damage": 30,
+            "color": (70, 225, 255),
+            "freeze": 56,
+            "name": "CHAPÉU BUMERANGUE",
+            "cutin": {"frame": 0, "box": (52, 50, 126, 112)},
+            "glint": (131, 97),
+            "boomerang": {"sheet_path": "assets/images/Sprites/caio_super_fx.png", "size": (152, 108),
+                          "hand": (273, 126), "catch": (115, 37), "reach": 640, "hits": 4, "every": 5,
+                          "box": (80, 46)},
+        },
     },
 ]
 CHARACTERS_BY_ID = {char["id"]: char for char in CHARACTERS}
@@ -276,11 +342,33 @@ def get_frames(char_id, alt_palette=False):
 
 
 def get_super_fx(char_id):
-    """Frames do efeito do SUPER (olhando para a direita), ou None se o personagem não tiver."""
+    """Frames do efeito do SUPER (onda do Igor, chapéu do Caio), olhando para a direita, ou None."""
     if char_id not in _fx_cache:
-        fx = CHARACTERS_BY_ID[char_id].get("super", {}).get("fx")
+        sup = CHARACTERS_BY_ID[char_id].get("super", {})
+        fx = sup.get("fx") or sup.get("boomerang")
         _fx_cache[char_id] = _strip(fx["sheet_path"], *fx["size"]) if fx else None
     return _fx_cache[char_id]
+
+
+_scaled_cache = {}
+
+
+def scaled_frame(image, scale, flip=False, ghost=False):
+    """Cópia escalada (em passos de 5%) e espelhada de um frame do cache, guardada para reuso.
+    ghost=True devolve uma cópia separada, azulada, para o rastro (quem usa muda o alfa dela)."""
+    step = max(1, round(scale * 20))
+    key = (id(image), step, flip, ghost)
+    if key not in _scaled_cache:
+        if step == 20:
+            scaled = image.copy()
+        else:
+            size = (max(1, round(image.get_width() * step / 20)), max(1, round(image.get_height() * step / 20)))
+            scaled = pygame.transform.smoothscale(image, size)
+        scaled = pygame.transform.flip(scaled, flip, False)
+        if ghost:
+            scaled.fill((0, 40, 70), special_flags=pygame.BLEND_RGB_ADD)
+        _scaled_cache[key] = scaled
+    return _scaled_cache[key]
 
 
 def preload_characters():
@@ -321,11 +409,90 @@ class _CpuMemory:
         self.plan = "wait"
         self.think_timer = 0
         self.jump_started = False
-        self.threat_seen = False   # já sorteou o parry contra o golpe atual do oponente?
+        self.threat_seen = None    # chave do último golpe do oponente em que já sorteou o parry
         self.parry_in = -1         # frames até tocar para trás (-1 = não vai tentar)
         self.bracing = False       # já tocou para trás: fica parada esperando o golpe
         self.punish_seen = False   # já sorteou o castigo da recuperação atual do oponente?
         self.air_seen = False      # já sorteou o anti-aéreo do pulo atual do oponente?
+
+
+class Hat:
+    """Chapéu do SUPER bumerangue em voo. x, y = centro na tela; direction = lado para onde foi.
+
+    state: "out" (indo, cada vez mais devagar), "grind" (furando o oponente; quem move é o
+    Fighter) ou "back" (voltando, cada vez mais rápido, e no fim subindo até a mão)."""
+    __slots__ = ("x", "y", "base_y", "line_y", "direction", "speed", "state", "passes", "hits_left",
+                 "clock", "touched", "dead", "dragging", "age", "scale", "trail")
+
+    def __init__(self, x, y, line_y, direction, speed):
+        self.x, self.y = x, y
+        self.base_y = y            # altura sem a subida final para a mão
+        self.line_y = line_y
+        self.direction = direction
+        self.speed = speed
+        self.state = "out"
+        self.passes = 0            # 0 = ida, 1 = volta
+        self.hits_left = 0
+        self.clock = 0
+        self.touched = False       # já encostou no oponente nesta passada
+        self.dead = False          # levou parry: volta sem acertar mais nada
+        self.dragging = False      # a volta pegou o oponente e vem arrastando
+        self.age = 0
+        self.scale = HAT_START_SCALE
+        self.trail = []            # (x, y, escala) dos últimos frames
+
+    def copy(self):
+        hat = Hat(self.x, self.y, self.line_y, self.direction, self.speed)
+        for name in ("base_y", "state", "passes", "touched", "age", "scale"):
+            setattr(hat, name, getattr(self, name))
+        return hat
+
+    def box(self, size):
+        rect = pygame.Rect(0, 0, round(size[0] * self.scale), round(size[1] * self.scale))
+        rect.center = (round(self.x), round(self.y))
+        return rect
+
+    def step(self, catch, screen_width):
+        """Anda um frame. catch = (x, y) da mão de quem jogou. Retorna True ao chegar na mão."""
+        self.age += 1
+        self.scale = min(1.0, self.scale + (1 - HAT_START_SCALE) / HAT_GROW)
+        self.base_y += (self.line_y - self.base_y) * 0.15  # desce da mão para a altura do voo
+        self.y = self.base_y
+        if self.state == "out":
+            self.x += self.direction * self.speed
+            self.speed -= HAT_DECEL
+            low, high = HAT_EDGE, screen_width - HAT_EDGE
+            if self.speed <= 0 or not low <= self.x <= high:
+                self.x = min(high, max(low, self.x))
+                self.state, self.speed, self.passes, self.touched = "back", 0.0, 1, False
+        elif self.state == "back":
+            self.speed = min(HAT_MAX_SPEED, self.speed + HAT_DECEL)
+            self.x -= self.direction * self.speed
+            ahead = (self.x - catch[0]) * self.direction  # quanto falta (positivo = ainda na frente)
+            if ahead <= 0:
+                self.x, self.y = catch
+                return True
+            if ahead < HAT_RISE:  # perto da mão: sobe até ela e volta ao tamanho de chapéu na mão
+                t = 1 - ahead / HAT_RISE
+                t = t * t * (3 - 2 * t)
+                self.y = self.base_y + (catch[1] - self.base_y) * t
+                self.scale = min(self.scale, 1 - (1 - HAT_START_SCALE) * t)
+        return False
+
+    def swept_box(self, size, before):
+        """Hitbox cobrindo o caminho do frame (de before até aqui): rápido, não atravessa ninguém."""
+        return before.union(self.box(size))
+
+    def frames_to_touch(self, rect, size, catch, screen_width, limit=160):
+        """Em quantos frames encosta em rect (parado lá), seguindo o voo; None se voltar sem encostar."""
+        hat = self.copy()
+        for frame in range(limit):
+            before = hat.box(size)
+            if hat.step(catch, screen_width):
+                return None
+            if hat.swept_box(size, before).colliderect(rect):
+                return frame
+        return None
 
 
 class Fighter():
@@ -342,6 +509,7 @@ class Fighter():
         self.super_damage = (self.super_data or {}).get("damage", ATTACKS[SUPER]["damage"])
         self.launch = (self.super_data or {}).get("launch")
         self.sonic = (self.super_data or {}).get("sonic")
+        self.boomerang = (self.super_data or {}).get("boomerang")
         stats = character["stats"]
         self.max_health = stats["max_health"]
         self.speed = stats["speed"]
@@ -357,7 +525,7 @@ class Fighter():
         self.action = 0
         self.frame_index = 0
         self.image = self.animation_list[self.action][self.frame_index]
-        self.update_time = pygame.time.get_ticks()
+        self.anim_ms = 0.0             # tempo de jogo (ms) no frame atual da animação
         self.rect = pygame.Rect((x, y, 100, 300))
         self.vel_y = 0
         self.last_dx = 0               # deslocamento horizontal do último frame (a IA usa)
@@ -366,6 +534,7 @@ class Fighter():
         self.jumping = False
         self.attacking = False
         self.attack_type = 0
+        self.attack_id = 0             # conta os golpes (a CPU avalia o parry de cada um uma vez)
         self.attack_cooldown = 0
         self.attack_fast = False       # o golpe atual gastou estamina (cooldown menor)
         self.attack_hit_done = False   # garante 1 acerto por golpe
@@ -392,10 +561,14 @@ class Fighter():
         self.juggle_timer = 0
         self.multi_left = 0            # SUPER sônico: acertos que ainda faltam na rajada
         self.multi_clock = 0
+        self.hat = None                # SUPER bumerangue: o chapéu em voo (Hat)
+        self.hat_caught_at = (0, 0)    # onde o chapéu chegou na mão (o main solta faíscas ali)
+        self.hitstun = 0               # frames preso na animação de dano (esperando a volta do chapéu)
+        self.arena_width = 1000        # largura da tela (vem do move; a IA usa na previsão do chapéu)
         self.tremor = 0                # frames vibrando (sprite treme no lugar)
         self.tremor_amp = 0
         self.tremor_xy = (0, 0)
-        self.signals = []              # avisos para o main: "super_start", "super_impact", "land"
+        self.signals = []              # avisos para o main: "super_start", "super_impact", "land", "hat_catch"
         self.tick = 0
         self.prev_held = {}            # teclas do frame anterior (para saber o instante do toque)
         self.last_tap = None           # última direção tocada (dash)
@@ -435,7 +608,7 @@ class Fighter():
         if not self.attacking or self.attack_hit_done:
             return 0
         ms = sum(self.frame_ms(self.action, i) for i in range(self.frame_index, self.impact_frame()))
-        ms -= pygame.time.get_ticks() - self.update_time
+        ms -= self.anim_ms
         return max(0, round(ms / FRAME_MS))
 
     def floating(self):
@@ -463,9 +636,47 @@ class Fighter():
         """Centro do desenho (a sombra usa), igual para frames normais e do SUPER."""
         return self.rect.x - self.offset[0] + self.frame_size // 2
 
+    def super_point(self, px, py):
+        """Onde o pixel (px, py) de um frame do SUPER aparece na tela agora (espelhado se virado)."""
+        left, top, _, _ = self.super_data["rect"]
+        x0 = self.rect.x - self.offset[0]
+        x = x0 + self.frame_size - left - px if self.flip else x0 + left + px
+        return x, self.rect.y - self.offset[1] + top + py
+
+    def threat(self, target):
+        """Golpe deste lutador que vai encostar em target: (chave, frames até encostar) ou None.
+        A chave muda a cada golpe e a cada passada do chapéu; a CPU sorteia o parry uma vez por chave."""
+        hat = self.hat
+        if hat is not None:
+            if hat.dead or hat.touched or hat.state == "grind":
+                return None
+            frames = hat.frames_to_touch(target.rect, self.boomerang["box"],
+                                         self.super_point(*self.boomerang["catch"]), self.arena_width)
+            return None if frames is None else ((self.attack_id, hat.passes), frames)
+        if not self.attacking or self.attack_hit_done:
+            return None
+        if self.attack_type == SUPER and self.boomerang:
+            # ainda na preparação: o chapéu vai sair da mão no frame do arremesso
+            flight = self._new_hat().frames_to_touch(target.rect, self.boomerang["box"],
+                                                     self.super_point(*self.boomerang["catch"]), self.arena_width)
+            return None if flight is None else ((self.attack_id, 0), self.frames_to_impact() + flight)
+        dist = abs(target.rect.centerx - self.rect.centerx)
+        if dist > self.attack_reach(self.attack_type) + target.rect.width // 2 + 40:
+            return None
+        return (self.attack_id, 0), self.frames_to_impact()
+
     def pop_signals(self):
         signals, self.signals = self.signals, []
         return signals
+
+    def sync_state(self):
+        """Números que definem a luta (o online compara os dos dois computadores)."""
+        hat = self.hat
+        return (self.rect.x, self.rect.y, self.health, self.action, self.frame_index, round(self.anim_ms),
+                self.vel_y, round(self.knockback * 100), round(self.stamina * 100), self.super_meter,
+                self.attack_cooldown, self.parry_timer, self.dash_timer, self.stun_timer, self.hitstun,
+                self.attacking, self.hit, self.jumping, self.juggled, self.flip,
+                None if hat is None else (round(hat.x), round(hat.y), hat.state))
 
     def spend_stamina(self, amount):
         self.stamina = max(0, self.stamina - amount)
@@ -475,14 +686,16 @@ class Fighter():
         self.super_meter = min(SUPER_MAX, self.super_meter + amount)
 
     # ---------------- MOVIMENTO ----------------
-    def move(self, screen_width, screen_height, target, can_act=True):
-        """Controles + física de um frame. Retorna um HitEvent se um golpe encostou no oponente."""
+    def move(self, screen_width, screen_height, target, can_act=True, held=None):
+        """Controles + física de um frame. Retorna um HitEvent se um golpe encostou no oponente.
+        held: botões deste frame (dict de BUTTONS) vindos de fora (rede); None = ler o teclado."""
         dx = 0
         dy = 0
         self.running = False
         self.tick += 1
         on_ground = not self.jumping
         hit_event = None
+        self.arena_width = screen_width
         if self.parry_timer > 0:
             self.parry_timer -= 1
         if self.parry_cooldown > 0:
@@ -490,8 +703,8 @@ class Fighter():
         if self.dash_cooldown > 0:
             self.dash_cooldown -= 1
 
-        # o teclado é lido todo frame para perceber o instante exato do toque
-        player_inputs = None if self.is_cpu else self._read_player_inputs(target)
+        # os botões são lidos todo frame para perceber o instante exato do toque
+        player_inputs = None if self.is_cpu else self._read_player_inputs(target, held)
 
         if self.dash_timer > 0:
             # DASH: rápido no começo e desacelerando; sem controle até acabar
@@ -546,7 +759,14 @@ class Fighter():
                         self.multi_left = self.sonic["hits"] - 1
                         self.multi_clock = self.sonic["every"]
                         self.tremor, self.tremor_amp = TREMOR_SELF, TREMOR_SELF_AMP
-                hit_event = self.resolve_attack(target) or hit_event
+                if self.attack_type == SUPER and self.boomerang:
+                    self.hat = self._new_hat()  # o chapéu sai da mão; quem acerta é ele
+                else:
+                    hit_event = self.resolve_attack(target) or hit_event
+
+        # SUPER bumerangue: o chapéu voa sozinho (mesmo se quem jogou apanhar)
+        if self.hat is not None:
+            hit_event = self._update_hat(target) or hit_event
 
         # SUPER sônico: os outros acertos da rajada, um a cada "every" frames
         if self.multi_left > 0:
@@ -615,11 +835,10 @@ class Fighter():
 
         return hit_event
 
-    def _read_player_inputs(self, target):
-        """Teclado -> intenções. Parry = TOCAR para trás (longe do oponente); dash = 2 toques."""
-        key = pygame.key.get_pressed()
-        c = self.controls
-        held = {name: bool(key[c[name]]) for name in ("left", "right", "jump", "atk1", "atk2", "super")}
+    def _read_player_inputs(self, target, held=None):
+        """Botões -> intenções. Parry = TOCAR para trás (longe do oponente); dash = 2 toques."""
+        if held is None:
+            held = keyboard_buttons(self.controls)
         pressed = {name: down and not self.prev_held.get(name, False) for name, down in held.items()}
         self.prev_held = held
 
@@ -662,18 +881,17 @@ class Fighter():
         toward = "right" if target.rect.centerx > self.rect.centerx else "left"
         away = "left" if toward == "right" else "right"
 
-        # 1) PARRY: cada golpe do oponente é avaliado uma única vez. A CPU mira no meio da
-        #    janela, mas erra o tempo conforme a dificuldade (às vezes toca cedo ou tarde demais).
-        threat = target.attacking and not target.attack_hit_done
-        if threat and not mem.threat_seen:
-            mem.threat_seen = True
-            danger = target.attack_reach(target.attack_type) + self.rect.width // 2 + 40
-            if dist <= danger and random.random() < profile["parry"]:
+        # 1) PARRY: cada golpe do oponente que vai alcançar a CPU (e cada passada do chapéu do
+        #    SUPER bumerangue) é avaliado uma única vez. A CPU mira no meio da janela, mas erra o
+        #    tempo conforme a dificuldade (às vezes toca cedo ou tarde demais).
+        threat = target.threat(self)
+        if threat and mem.threat_seen != threat[0]:
+            mem.threat_seen = threat[0]
+            if random.random() < profile["parry"]:
                 err = profile["parry_error"]
-                aim = target.frames_to_impact() - (PARRY_WINDOW + 1) // 2
+                aim = threat[1] - (PARRY_WINDOW + 1) // 2
                 mem.parry_in = max(0, aim + random.randint(-err, err))
         if not target.attacking:
-            mem.threat_seen = False
             mem.punish_seen = False
 
         if threat and (mem.parry_in >= 0 or mem.bracing):
@@ -850,6 +1068,7 @@ class Fighter():
             return
         self.attacking = True
         self.attack_type = attack_type
+        self.attack_id += 1
         self.attack_hit_done = False
         self.attack_landed = False
         self.parry_timer = 0
@@ -865,7 +1084,7 @@ class Fighter():
         # força a animação a começar do primeiro frame
         self.action = ATTACK_ACTION[attack_type]
         self.frame_index = 0
-        self.update_time = pygame.time.get_ticks()
+        self.anim_ms = 0.0
 
     def _attack_box(self, target):
         """Hitbox do golpe atual. Retorna (direção, ponto de contato) se pegou o oponente, senão None."""
@@ -956,6 +1175,128 @@ class Fighter():
         ground_contact = (target.rect.centerx, target.rect.bottom - 20)
         return HitEvent("launch", SUPER, ground_contact, direction, not target.alive, self.super_color)
 
+    # ---------------- SUPER BUMERANGUE ----------------
+    def _new_hat(self):
+        """Chapéu saindo da mão (onde ele está no frame do arremesso), com força para ir até o
+        alcance máximo ou a parede, o que vier antes."""
+        x, y = self.super_point(*self.boomerang["hand"])
+        direction = -1 if self.flip else 1
+        room = self.arena_width - HAT_EDGE - x if direction > 0 else x - HAT_EDGE
+        reach = max(30, min(self.boomerang["reach"], room))
+        return Hat(x, y, self.rect.bottom - HAT_LINE, direction, math.sqrt(2 * HAT_DECEL * reach))
+
+    def _update_hat(self, target):
+        """Um frame do chapéu: anda, fura/acerta o oponente, arrasta e chega na mão."""
+        hat = self.hat
+        if not self.alive or hat.age > HAT_LIFE:
+            self._end_hat(target)
+            return None
+        hat.trail.append((hat.x, hat.y, hat.scale))
+        del hat.trail[:-HAT_TRAIL]
+        event = None
+        size = self.boomerang["box"]
+        before = hat.box(size)
+        if hat.state == "grind":
+            hat.step(None, self.arena_width)
+            hat.x = target.rect.centerx - hat.direction * HAT_GRIND_DEPTH  # vai junto com o empurrão
+            hat.clock -= 1
+            if hat.clock <= 0:
+                event = self._hat_tick(target)
+        elif hat.step(self.super_point(*self.boomerang["catch"]), self.arena_width):
+            self.hat_caught_at = (hat.x, hat.y)
+            self._end_hat(target)
+            self.signals.append("hat_catch")
+            if self.attacking and self.action == 7:  # pega o chapéu: sai do frame de espera
+                self.frame_index = self.impact_frame() + 1
+                self.anim_ms = 0.0
+            return None
+        elif (not hat.dead and not hat.touched and target.alive and not target.invulnerable()
+              and hat.swept_box(size, before).colliderect(target.rect)):
+            event = self._hat_contact(target)
+
+        if hat.dragging:
+            if target.alive and target.juggled:
+                # arrasta junto (o oponente vem um pouco atrás), mas para antes de encostar
+                gap_x = self.rect.centerx + hat.direction * HAT_PULL_GAP
+                target.juggle_x = hat.x if (hat.x - gap_x) * hat.direction > 0 else gap_x
+                target.juggle_timer = HAT_DRAG_TIMER
+            else:
+                hat.dragging = False
+        return event
+
+    def _end_hat(self, target):
+        """O chapéu sumiu (chegou na mão ou quem jogou caiu): solta quem estava sendo arrastado.
+        Ele ainda vai até perto de quem jogou e fica caído até o fim da pose."""
+        hat = self.hat
+        self.hat = None
+        if hat is not None and hat.dragging and target.alive and target.juggled:
+            target.juggle_x = self.rect.centerx + hat.direction * HAT_PULL_GAP
+            target.juggle_timer = HAT_DRAG_TIMER
+            if self.attacking and self.action == 7:
+                rest = sum(self.frame_ms(7, i) for i in range(self.impact_frame() + 1, len(self.animation_list[7])))
+                target.hitstun = max(target.hitstun, round(rest / FRAME_MS) + HAT_RECOVER_EXTRA)
+
+    def _hat_contact_point(self, target):
+        hat = self.hat
+        x = target.rect.centerx - hat.direction * (25 if hat.passes == 0 else -25)
+        return x, round(hat.y) + random.randint(-14, 14)
+
+    def _hat_contact(self, target):
+        """Chapéu encostou no oponente: parry, começo das furadas (ida) ou o puxão (volta)."""
+        hat = self.hat
+        hat.touched = True
+        moving = hat.direction if hat.passes == 0 else -hat.direction  # para onde o chapéu anda
+        if target.parry_timer > 0 and not target.attacking and not target.hit:
+            target.on_parry()
+            hat.dead = True
+            if hat.state == "out":  # ricocheteia de volta para a mão, sem acertar mais
+                hat.state, hat.speed, hat.passes = "back", 0.0, 1
+            return HitEvent("parry", SUPER, self._hat_contact_point(target), moving, False)
+        if hat.passes == 0:
+            hat.state = "grind"
+            hat.hits_left = self.boomerang["hits"]
+            return self._hat_tick(target)
+        return self._hat_pull(target)
+
+    def _hat_tick_damage(self):
+        return round(self.super_damage * HAT_TICK_SHARE)
+
+    def _hat_tick(self, target):
+        """Uma furada: pouco dano, empurra de leve e segura o oponente até a volta."""
+        hat = self.hat
+        hat.hits_left -= 1
+        hat.clock = self.boomerang["every"]
+        target.take_hit(max(1, round(self._hat_tick_damage() * self.dmg_mult)), HAT_TICK_PUSH,
+                        hat.direction, meter=False)
+        target.flash_timer = 3  # pisca a cada furada em vez de ficar branco direto
+        target.tremor, target.tremor_amp = HAT_TREMOR, HAT_TREMOR_AMP
+        if target.alive:
+            target.hitstun = HAT_HOLD
+        if hat.hits_left <= 0 or not target.alive:  # atravessa e vai um pouco além antes de voltar
+            hat.state = "out"
+            hat.speed = math.sqrt(2 * HAT_DECEL * HAT_PASS)
+        return HitEvent("multi", SUPER, self._hat_contact_point(target), hat.direction,
+                        not target.alive, self.super_color)
+
+    def _hat_pull(self, target):
+        """Volta: o resto do dano, e o oponente é levantado e arrastado até perto de quem jogou."""
+        hat = self.hat
+        pull = -hat.direction
+        base = self.super_damage - self._hat_tick_damage() * self.boomerang["hits"]
+        target.take_hit(max(1, round(base * self.dmg_mult)), 0, pull)
+        target.hitstun = 0
+        if target.alive:
+            target.vel_y = HAT_PULL_POP
+            target.jumping = True
+            target.juggled = True
+            target.juggle_x = target.rect.centerx
+            target.juggle_timer = HAT_DRAG_TIMER
+            hat.dragging = True
+        else:
+            target.knockback = pull * 12
+        self.gain_super(SUPER_GAIN_HIT[SUPER])
+        return HitEvent("hit", SUPER, self._hat_contact_point(target), pull, not target.alive, self.super_color)
+
     def on_parry(self):
         """Parry certo: janela fecha, pode tentar de novo e contra-atacar na hora."""
         self.parry_timer = 0
@@ -975,7 +1316,7 @@ class Fighter():
         self.dash_timer = 0
         self.action = 5
         self.frame_index = 0
-        self.update_time = pygame.time.get_ticks()
+        self.anim_ms = 0.0
 
     def take_hit(self, damage, knockback, direction, meter=True):
         """meter=False: não enche a barra de SUPER (acertos do meio de uma rajada)."""
@@ -989,7 +1330,7 @@ class Fighter():
         self.flash_timer = 6
         self.action = 5
         self.frame_index = 0
-        self.update_time = pygame.time.get_ticks()
+        self.anim_ms = 0.0
         if meter:
             self.gain_super(SUPER_GAIN_HURT)
         self.trail_delay = TRAIL_DELAY
@@ -1014,18 +1355,23 @@ class Fighter():
         else:
             self.update_action(0)
 
-        if pygame.time.get_ticks() - self.update_time > self.frame_ms(self.action, self.frame_index):
+        # o tempo das animações conta quadros de jogo (e não o relógio do computador): assim os
+        # dois jogadores do modo online veem exatamente a mesma luta
+        self.anim_ms += FRAME_MS
+        if self.anim_ms > self.frame_ms(self.action, self.frame_index):
             self.frame_index += 1
-            self.update_time = pygame.time.get_ticks()
+            self.anim_ms = 0.0
 
         frames = len(self.animation_list[self.action])
         if self.action == 7 and self.super_air and self.jumping and self.frame_index >= frames - 1:
             self.frame_index = frames - 2  # SUPER aéreo: segura o penúltimo frame até pousar
+        if self.action == 7 and self.hat is not None and self.frame_index > self.impact_frame():
+            self.frame_index = self.impact_frame()  # braço esticado esperando o chapéu voltar
         if self.frame_index >= frames:
             if not self.alive:
                 self.frame_index = frames - 1
-            elif self.action == 5 and (self.stun_timer > 0 or self.juggled):
-                self.frame_index = frames - 1  # tonto ou no ar: segura o último frame
+            elif self.action == 5 and (self.stun_timer > 0 or self.juggled or self.hitstun > 0):
+                self.frame_index = frames - 1  # tonto, no ar ou preso: segura o último frame
             else:
                 self.frame_index = 0
                 if self.action in ATTACK_ACTIONS:
@@ -1039,7 +1385,7 @@ class Fighter():
 
         self.image = self.animation_list[self.action][self.frame_index]
 
-        for timer in ("flash_timer", "parry_flash", "attack_rect_timer", "stun_timer"):
+        for timer in ("flash_timer", "parry_flash", "attack_rect_timer", "stun_timer", "hitstun"):
             if getattr(self, timer) > 0:
                 setattr(self, timer, getattr(self, timer) - 1)
 
@@ -1069,7 +1415,7 @@ class Fighter():
         if new_action != self.action:
             self.action = new_action
             self.frame_index = 0
-            self.update_time = pygame.time.get_ticks()
+            self.anim_ms = 0.0
 
     def draw(self, surface, offset=(0, 0)):
         """Desenha o lutador; offset desloca tudo (tremor de tela)."""
@@ -1116,3 +1462,22 @@ class Fighter():
             pygame.draw.rect(surface, (255, 0, 0), self.rect.move(ox, oy), 2)
             if self.attack_rect_timer > 0 and self.attack_rect:
                 pygame.draw.rect(surface, (0, 255, 0), self.attack_rect.move(ox, oy), 2)
+
+    def draw_hat(self, surface, offset=(0, 0)):
+        """Chapéu do SUPER bumerangue girando, com rastro azulado (desenhado por cima dos dois)."""
+        hat = self.hat
+        if hat is None:
+            return
+        frames = get_super_fx(self.character["id"])
+        ox, oy = offset
+        flip = hat.direction < 0
+        index = (hat.age // 2) % len(frames)
+        # rastro: o chapéu de alguns frames atrás, cada vez mais apagado
+        for alpha, (x, y, scale) in zip((120, 80, 45), hat.trail[-3::-2]):
+            ghost = scaled_frame(frames[index], scale, flip, ghost=True)
+            ghost.set_alpha(alpha)
+            surface.blit(ghost, ghost.get_rect(center=(round(x + ox), round(y + oy))))
+        image = scaled_frame(frames[index], hat.scale, flip)
+        surface.blit(image, image.get_rect(center=(round(hat.x + ox), round(hat.y + oy))))
+        if DEBUG:
+            pygame.draw.rect(surface, (0, 255, 0), hat.box(self.boomerang["box"]).move(ox, oy), 2)

@@ -3,6 +3,10 @@
 Uso (dentro da pasta Luta):
     python tools/montar_super.py igor
     python tools/montar_super.py zuzu --opaco   (personagem sem contorno escuro, ex.: render 3D)
+    python tools/montar_super.py caio --pecas --projetil
+        --pecas    -> frames que se cruzam na vertical (braço de um sobre a perna do outro): cada
+                      frame é o seu corpo inteiro, um pedaço opaco só
+        --projetil -> o efeito é um objeto que voa (chapéu): frames centralizados no objeto
 
 Entrada (assets/images/Sprites/raw/):
     <id>_super_raw.png     -> linha com os frames do personagem, olhando para a DIREITA
@@ -11,6 +15,7 @@ Entrada (assets/images/Sprites/raw/):
 Saída (assets/images/Sprites/):
     <id>_super.png     -> frames do personagem já na escala do jogo, todos do mesmo tamanho
     <id>_super_fx.png  -> frames do efeito, alinhados pelo canto esquerdo e pelo chão
+                          (com --projetil: centro do objeto no centro de cada frame)
 
 No fim imprime os números para colar no "super" do personagem em CHARACTERS (fighter.py).
 
@@ -39,6 +44,8 @@ PART_ALPHA = 60        # aura com alfa a partir disso forma "partes" que não s�
 PART_MAJORITY = 0.7    # parte vai inteira para um frame se 70% dela já for dele
 FX_SCALE_REL = 1.1     # efeito um pouco maior que a escala do personagem
 LEGS_FRACTION = 0.35   # modo opaco: parte de baixo do corpo usada para separar os frames
+PIECE_MIN = 0.3        # modo peças: pedaço com pelo menos 30% do maior é um corpo (um frame)
+PROJECTILE_SCALE_REL = 0.58  # projétil: o chapéu do desenho é ~2x o da cabeça; voando fica ~1,5x
 
 
 def luminance(arr):
@@ -98,11 +105,40 @@ def _label_by_legs(body):
     return bodies, labels
 
 
-def split_by_bodies(body, alpha, opaque=False):
+def _label_by_pieces(body):
+    """Modo peças: cada frame é um pedaço opaco grande (o corpo inteiro), mesmo que um frame
+    passe por cima das colunas do vizinho. Pedaço pequeno solto (chapéu no ar) é do corpo mais
+    perto da sua ponta de TRÁS: o personagem olha para a direita e solta o objeto para a frente."""
+    parts, count = ndimage.label(body, structure=np.ones((3, 3)))
+    index = np.arange(1, count + 1)
+    sizes = ndimage.sum(body, parts, index=index)
+    boxes = ndimage.find_objects(parts)
+    big = sorted((i for i in index if sizes[i - 1] >= PIECE_MIN * sizes.max()),
+                 key=lambda i: boxes[i - 1][1].start + boxes[i - 1][1].stop)
+    labels = np.zeros(body.shape, dtype=np.int32)
+    bodies, pixels = [], []
+    for frame, idx in enumerate(big, start=1):
+        labels[parts == idx] = frame
+        bodies.append([boxes[idx - 1][1].start, boxes[idx - 1][1].stop])
+        pixels.append(np.argwhere(parts == idx)[::7])  # amostra basta para medir distância
+    for idx in index:
+        if idx in big:
+            continue
+        ys, xs = np.nonzero(parts == idx)
+        back = xs.argmin()
+        dist = [np.hypot(p[:, 0] - ys[back], p[:, 1] - xs[back]).min() for p in pixels]
+        labels[ys, xs] = int(np.argmin(dist)) + 1
+    return bodies, labels
+
+
+def split_by_bodies(body, alpha, mode=None):
     """Acha os corpos (colunas com roupa/contorno) e diz de qual frame é cada pixel.
     Assim a aura de um frame que invade o espaço do vizinho continua no frame certo.
+    mode: None (contorno escuro), "opaco" (separa pelas pernas) ou "pecas" (pedaços inteiros).
     Retorna (trechos de coluna de cada corpo, mapa dono[y, x] = 1..n)."""
-    if opaque:
+    if mode == "pecas":
+        bodies, labels = _label_by_pieces(body)
+    elif mode == "opaco":
         bodies, labels = _label_by_legs(body)
     else:
         bodies = split_frames(body.astype(np.uint8) * 255)
@@ -139,28 +175,28 @@ def idle_reference(char):
             "frame": int(size * scale)}
 
 
-def build_character(char, raw_path, out_path, opaque=False):
-    """opaque=True: personagem sem contorno (render 3D); o corpo é a parte 100% opaca da imagem
-    (o remover_fundo deixa efeitos semitransparentes)."""
+def build_character(char, raw_path, out_path, mode=None):
+    """mode "opaco" (render 3D sem contorno) ou "pecas": o corpo é a parte 100% opaca da imagem
+    (o remover_fundo deixa efeitos semitransparentes). Sem mode: roupa/contorno escuros."""
     ref = idle_reference(char)
     img = Image.open(raw_path).convert("RGBA")
     arr = np.array(img).astype(int)
     alpha = arr[..., 3]
     saturation = arr[..., :3].max(axis=2) - arr[..., :3].min(axis=2)
-    if opaque:
+    if mode:
         dark = feet = alpha >= 250
     else:
         # escuro e sem cor = roupa/contorno; azul-escuro forte de aura não conta
         dark = (alpha > 200) & (luminance(arr) < DARK_LUM) & (saturation < DARK_SAT)
         # pés: contorno escuro do tênis; tolera um pouco de cor (a luz da aura tinge o contorno)
         feet = (alpha > 200) & (luminance(arr) < DARK_LUM) & (saturation < FEET_SAT)
-    bodies, owner = split_by_bodies(dark, alpha, opaque)
+    bodies, owner = split_by_bodies(dark, alpha, mode)
 
     mine = [feet & (owner == i) for i in range(1, len(bodies) + 1)]
     baseline = int(np.median([np.nonzero(m.any(axis=1))[0].max() for m in mine]))
     back_feet = [np.nonzero(m[baseline - FEET_BAND:baseline + 4].any(axis=0))[0].min() for m in mine]
 
-    if opaque:  # as colunas das pernas podem não cobrir a cabeça: usa o que é do último frame
+    if mode:  # as colunas das pernas podem não cobrir a cabeça: usa o que é do último frame
         last_top = np.nonzero((dark & (owner == len(bodies))).any(axis=1))[0].min()
     else:
         last_x0, last_x1 = bodies[-1]
@@ -228,6 +264,34 @@ def build_fx(raw_path, out_path, scale):
     return {"size": (width, height), "steps": len(boxes), "ground": round((ground - y_top) * scale)}
 
 
+def build_projectile(raw_path, out_path, scale):
+    """Objeto que voa (chapéu girando): o centro da parte opaca (o objeto) fica no centro de cada
+    frame, para ele não sacudir ao trocar de frame; o brilho em volta muda à vontade."""
+    img = Image.open(raw_path).convert("RGBA")
+    alpha = np.array(img)[..., 3]
+    pieces = []
+    for x0, x1 in split_frames(alpha):
+        frame = alpha[:, x0:x1]
+        ys, xs = np.nonzero(frame >= 250)
+        cx, cy = (xs.min() + xs.max() + 1) / 2, (ys.min() + ys.max() + 1) / 2
+        vy, vx = np.nonzero(frame > 10)
+        reach_x = max(cx - vx.min(), vx.max() + 1 - cx)
+        reach_y = max(cy - vy.min(), vy.max() + 1 - cy)
+        pieces.append((img.crop((x0, 0, x1, img.height)), cx, cy, reach_x, reach_y,
+                       xs.max() + 1 - xs.min(), ys.max() + 1 - ys.min()))
+    half_w = int(np.ceil(max(p[3] for p in pieces)))
+    half_h = int(np.ceil(max(p[4] for p in pieces)))
+    width, height = round(2 * half_w * scale) + 2, round(2 * half_h * scale) + 2
+    sheet = Image.new("RGBA", (width * len(pieces), height), (0, 0, 0, 0))
+    for i, (frame, cx, cy, *_) in enumerate(pieces):
+        # recorte além da borda do frame vem transparente
+        crop = frame.crop((round(cx - half_w), round(cy - half_h), round(cx + half_w), round(cy + half_h)))
+        sheet.alpha_composite(crop.resize((width - 2, height - 2), Image.LANCZOS), (i * width + 1, 1))
+    sheet.save(out_path)
+    body = (round(max(p[5] for p in pieces) * scale), round(max(p[6] for p in pieces) * scale))
+    return {"size": (width, height), "steps": len(pieces), "body": body}
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     char_id = args[0] if args else "igor"
@@ -235,14 +299,19 @@ def main():
     sprites = os.path.join(ROOT, "assets", "images", "Sprites")
     raw = os.path.join(sprites, "raw")
 
+    mode = "pecas" if "--pecas" in sys.argv else "opaco" if "--opaco" in sys.argv else None
     info = build_character(char, os.path.join(raw, f"{char_id}_super_raw.png"),
-                           os.path.join(sprites, f"{char_id}_super.png"), opaque="--opaco" in sys.argv)
+                           os.path.join(sprites, f"{char_id}_super.png"), mode)
     print(f"{char_id}_super.png  ->  rect={info['rect']}  steps={info['steps']}  "
           f"escala={info['scale']:.3f}  impacto~{info['impact']}")
 
     fx_raw = os.path.join(raw, f"{char_id}_super_fx_raw.png")
-    if os.path.exists(fx_raw):
-        fx = build_fx(fx_raw, os.path.join(sprites, f"{char_id}_super_fx.png"), info["scale"] * FX_SCALE_REL)
+    fx_out = os.path.join(sprites, f"{char_id}_super_fx.png")
+    if os.path.exists(fx_raw) and "--projetil" in sys.argv:
+        fx = build_projectile(fx_raw, fx_out, info["scale"] * PROJECTILE_SCALE_REL)
+        print(f"{char_id}_super_fx.png  ->  size={fx['size']}  steps={fx['steps']}  objeto={fx['body']}")
+    elif os.path.exists(fx_raw):
+        fx = build_fx(fx_raw, fx_out, info["scale"] * FX_SCALE_REL)
         print(f"{char_id}_super_fx.png  ->  size={fx['size']}  steps={fx['steps']}  chão={fx['ground']}")
 
 

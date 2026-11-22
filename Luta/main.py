@@ -1,12 +1,18 @@
+import json
 import math
+import os
 import random
+import socket
 import unicodedata
+import zlib
 
 import pygame
 
 import fighter as fighter_module
-from fighter import (CHARACTERS, CHARACTERS_BY_ID, DASH_COST, DIFFICULTIES, DIFFICULTY_LABELS, GROUND_MARGIN,
-                     SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_frames, get_super_fx, preload_characters)
+from online import DEFAULT_PORT, RELAY_PORT, NetSession, local_addresses, parse_address
+from fighter import (CHARACTERS, CHARACTERS_BY_ID, CONTROLS, DASH_COST, DIFFICULTIES, DIFFICULTY_LABELS, FRAME_MS,
+                     GROUND_MARGIN, SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_frames, get_super_fx,
+                     keyboard_buttons, pack_buttons, preload_characters, unpack_buttons)
 
 pygame.init()
 
@@ -39,10 +45,16 @@ CHAR_SELECT = "CHAR_SELECT"
 FIGHT = "FIGHT"
 PAUSE = "PAUSE"
 MATCH_OVER = "MATCH_OVER"
+ONLINE_MENU = "ONLINE_MENU"      # criar sala / entrar pelo IP / sala no servidor
+ONLINE_FORM = "ONLINE_FORM"      # digitando IP ou código da sala
+ONLINE_WAIT = "ONLINE_WAIT"      # esperando o outro jogador / conectando
+ONLINE_SELECT = "ONLINE_SELECT"  # seleção de lutadores com o outro jogador
+ONLINE_ERROR = "ONLINE_ERROR"    # aviso (conexão caiu, versão diferente...)
 
 # MODOS
 MODE_CPU = "cpu"
 MODE_VERSUS = "versus"
+MODE_ONLINE = "online"       # cada jogador no seu computador (pasta online/)
 
 # PARTIDA
 ROUNDS_TO_WIN = 2            # melhor de 3
@@ -82,6 +94,9 @@ CHROMA_DECAY = 0.85
 RIPPLE_DECAY = 0.975
 RIPPLE_STRIP = 6             # altura das faixas do cenário ondulando
 CUTIN_H = 170                # altura da faixa cinematográfica
+GLINT_COLOR = (150, 235, 255)   # brilho dos óculos (Caio): no lutador e, maior, no retrato da faixa
+GLINT_SIZE = 46
+CUTIN_GLINT_SIZE = 75
 ROOF_Y = (70, 135)           # de onde cai a poeira do teto
 FLOOR_Y = (440, 596)         # onde pulam as pedrinhas do chão
 DEBRIS_COLORS = ((150, 132, 112), (118, 108, 96), (92, 82, 72), (175, 160, 140))
@@ -513,6 +528,33 @@ def star_points(cx, cy, outer, inner, points, angle):
     return pts
 
 
+class Glint:
+    """Brilho de lente (óculos do Caio): estrela fina que abre, pulsa girando devagar e fecha."""
+    __slots__ = ("x", "y", "size", "life", "max_life")
+
+    def __init__(self, x, y, size, life):
+        self.x, self.y = x, y
+        self.size = size
+        self.life = self.max_life = life
+
+
+def glint_shape(t, age):
+    """Tamanho (0..1) e ângulo do brilho em t = 0 -> 1 da vida dele."""
+    grow = 1 - (1 - min(1.0, t / 0.12)) ** 3
+    fade = min(1.0, (1 - t) / 0.2)
+    return grow * fade * (1 + 0.12 * math.sin(age * 0.5)), 0.15 + t * 1.1
+
+
+def draw_glint(surface, x, y, size, angle, color):
+    """Estrela de 4 pontas comprida com raios menores na diagonal e miolo branco."""
+    if size < 2:
+        return
+    pygame.draw.polygon(surface, color, star_points(x, y, size, size * 0.13, 4, angle))
+    pygame.draw.polygon(surface, WHITE, star_points(x, y, size * 0.75, size * 0.07, 4, angle))
+    pygame.draw.polygon(surface, WHITE, star_points(x, y, size * 0.42, size * 0.07, 4, angle + math.pi / 4))
+    pygame.draw.circle(surface, WHITE, (x, y), max(2, size * 0.13))
+
+
 class Effects:
     """Faíscas, tremor de tela, clarão, hitstop e câmera lenta de uma luta.
 
@@ -531,8 +573,9 @@ class Effects:
         self.rings = []         # ondas sonoras
         self.ground_rings = []
         self.debris = []        # pedrinhas do chão e poeira do teto
+        self.glints = []        # brilho dos óculos
         self.sonic = None       # rajada sônica em andamento
-        self.combo = 0          # acertos da rajada (contador na tela)
+        self.combo = 0          # acertos seguidos do SUPER (rajada, furadas do chapéu)
         self.cutin = None       # faixa cinematográfica do SUPER
         self.hitstop = 0        # frames com o jogo congelado
         self.slowmo = 0         # frames restantes de câmera lenta
@@ -586,14 +629,17 @@ class Effects:
             self.impacts.append(Impact(x, y, 50, WHITE, star=False, life=10))
             self._shake(6, 12)
         elif event.kind == "multi":
-            # acerto do meio da rajada sônica: rápido, mas cada um sacode mais a tela
+            # acerto do meio de uma sequência do SUPER (rajada sônica, furadas do chapéu)
             self.hitstop = max(self.hitstop, MULTI_HITSTOP_FRAMES)
             self.combo += 1
             self._burst(x, y, event.direction, self.palette(event.color), 12, (3, 10), 1.1)
             self.impacts.append(Impact(x, y, 44, event.color or WHITE, star=False, life=10))
-            self.quake = min(1.0, self.quake + 0.25)
-            self.chroma = max(self.chroma, 4.0)
-            self.zoom = min(0.16, self.zoom + 0.015)
+            if self.sonic is not None:  # rajada: cada acerto sacode mais a tela inteira
+                self.quake = min(1.0, self.quake + 0.25)
+                self.chroma = max(self.chroma, 4.0)
+                self.zoom = min(0.16, self.zoom + 0.015)
+            else:
+                self._shake(3, 6)
             self.popup(str(self.combo), WHITE, x + random.randint(-24, 24), y - 70)
         else:
             heavy = event.attack_type >= 2
@@ -603,10 +649,12 @@ class Effects:
                         (4, 11 + 5 * heavy + 6 * is_super), 0.9 + 0.6 * is_super)
             self.impacts.append(Impact(x, y, 46 + 24 * heavy + 40 * is_super, WHITE, star=True))
             self._shake(3 + 3 * heavy + 5 * is_super, 8 + 6 * heavy + 10 * is_super)
-            if is_super and self.sonic is not None:
-                # último acerto da rajada: o maior de todos
+            if is_super and self.combo:
+                # último acerto de uma sequência: o maior de todos
                 self.combo += 1
                 self.popup(f"{self.combo} ACERTOS!", event.color or YELLOW, x, y - 100, menu_font)
+                self.combo = 0
+            if is_super and self.sonic is not None:
                 self.rings.append(SonicRing(x, y, 0.0, WHITE, span=math.pi, speed=22, width=14, life=26))
                 self.quake = 1.0
                 self.chroma = max(self.chroma, 10.0)
@@ -634,6 +682,10 @@ class Effects:
         self._burst(cx, cy, 1, self.palette(fighter.super_color), 18, (3, 9), math.pi)
         self.popup("SUPER!", YELLOW, cx, fighter.rect.y - 60, menu_font)
         self._shake(3, 10)
+        self.combo = 0
+        if "glint" in data:  # os óculos brilham durante todo o congelamento
+            gx, gy = fighter.super_point(*data["glint"])
+            self.glints.append(Glint(gx, gy, GLINT_SIZE, freeze + 8))
         if "cutin" in data:
             self.start_cutin(fighter, data, freeze)
         if fighter.sonic:
@@ -656,10 +708,19 @@ class Effects:
         name_img = pygame.Surface((front.get_width() + 6, front.get_height() + 6), pygame.SRCALPHA)
         name_img.blit(render_text(name, title_font, color), (6, 6))
         name_img.blit(front, (0, 0))
+        room = SCREEN_WIDTH - portrait.get_width() - 150  # nome comprido diminui para não cobrir o rosto
+        if name_img.get_width() > room:
+            ratio = room / name_img.get_width()
+            name_img = pygame.transform.smoothscale(name_img, (room, round(name_img.get_height() * ratio)))
         lines = [[random.uniform(0, SCREEN_WIDTH), random.uniform(4, CUTIN_H - 4), random.uniform(80, 280),
                   random.uniform(28, 60), random.choice((1, 1, 2, 3)),
                   random.choice(((255, 255, 255, 150), (*color, 170), (255, 255, 255, 70)))] for _ in range(30)]
-        self.cutin = {"portrait": portrait, "name": name_img, "color": color,
+        glint = None
+        if "glint" in data and cut["frame"] == 0:  # o brilho da lente também aparece no retrato
+            box_x, box_y = cut["box"][:2]
+            gx = (data["glint"][0] - box_x) * scale
+            glint = (portrait.get_width() - gx if fighter.flip else gx, (data["glint"][1] - box_y) * scale)
+        self.cutin = {"portrait": portrait, "name": name_img, "color": color, "glint": glint,
                       "label": render_text(fighter.name.upper(), score_font, color),
                       "side": -1 if fighter.flip else 1, "life": frames, "max_life": frames, "lines": lines}
 
@@ -667,6 +728,9 @@ class Effects:
         """Frame de impacto do SUPER: onda de choque (sprite do personagem ou genérica)."""
         if fighter.sonic:
             self.start_sonic(fighter, target)
+            return
+        if fighter.hat is not None:
+            self.start_hat(fighter)
             return
         direction = -1 if fighter.flip else 1
         ground = fighter.rect.bottom
@@ -733,6 +797,33 @@ class Effects:
         self._shake(10, 30)
         self.spawn_rocks(fighter.rect.centerx, 46)
 
+    def start_hat(self, fighter):
+        """Arremesso do chapéu: estouro de energia saindo da mão."""
+        hat, color = fighter.hat, fighter.super_color
+        self._burst(hat.x, hat.y, hat.direction, self.palette(color), 22, (5, 14), 0.5)
+        self.impacts.append(Impact(hat.x, hat.y, 90, color, star=False, life=14))
+        self.impacts.append(Impact(hat.x, hat.y, 46, WHITE, star=False, life=10))
+        self._shake(4, 10)
+
+    def on_hat_fly(self, fighter):
+        """Purpurina caindo atrás do chapéu em voo (chamado a cada frame de jogo)."""
+        hat = fighter.hat
+        if hat.state == "grind":
+            return
+        back = -hat.direction if hat.state == "out" else hat.direction  # oposto ao movimento
+        colors = self.palette(fighter.super_color)
+        for _ in range(2):
+            self.sparks.append(Spark(hat.x + random.uniform(-30, 30) * hat.scale,
+                                     hat.y + random.uniform(-16, 16) * hat.scale,
+                                     back * random.uniform(1, 4), random.uniform(-2.5, 0.5),
+                                     random.randint(8, 16), random.choice(colors), 2))
+
+    def on_hat_catch(self, fighter):
+        """O chapéu volta para a mão."""
+        x, y = fighter.hat_caught_at
+        self._burst(x, y, 1, self.palette(fighter.super_color), 14, (2, 7), math.pi)
+        self.impacts.append(Impact(x, y, 50, fighter.super_color, star=False, life=12))
+
     def spawn_rocks(self, center_x, count):
         """Pedrinhas pulando do chão da arena inteira (mais alto perto de quem estourou)."""
         for _ in range(count):
@@ -783,6 +874,9 @@ class Effects:
         for anim in self.anims:
             anim.age += 1
         self.anims = [a for a in self.anims if a.age < len(a.frames) * a.ticks]
+        for glint in self.glints:
+            glint.life -= 1
+        self.glints = [g for g in self.glints if g.life > 0]
         if self.shake_frames > 0:
             self.shake_frames -= 1
         self.flash = max(0, self.flash - 12)
@@ -889,6 +983,9 @@ class Effects:
             width = max(1, round(s.width * s.life / s.max_life))
             tail = (s.x - s.vx * 1.8 + ox, s.y - s.vy * 1.8 + oy)
             pygame.draw.line(screen, s.color, tail, (s.x + ox, s.y + oy), width)
+        for glint in self.glints:
+            size, angle = glint_shape(1 - glint.life / glint.max_life, glint.max_life - glint.life)
+            draw_glint(screen, glint.x + ox, glint.y + oy, glint.size * size, angle, GLINT_COLOR)
         for popup in self.popups:
             popup.image.set_alpha(min(255, popup.life * 20))
             screen.blit(popup.image, popup.image.get_rect(center=(popup.x + ox, popup.y + oy)))
@@ -959,7 +1056,13 @@ class Effects:
             px = -width + (width + 30) * slide + 40 * t
         else:
             px = SCREEN_WIDTH - (width + 30) * slide - 40 * t
-        screen.blit(portrait, (px, SCREEN_HEIGHT // 2 - portrait.get_height() // 2 + 12))
+        py = SCREEN_HEIGHT // 2 - portrait.get_height() // 2 + 12
+        screen.blit(portrait, (px, py))
+        if cutin["glint"]:  # brilho dos óculos: acende quando o rosto termina de entrar
+            gt = max(0.0, (t - 0.18) / 0.82)
+            size, angle = glint_shape(gt, cutin["max_life"] - cutin["life"])
+            gx, gy = cutin["glint"]
+            draw_glint(screen, px + gx, py + gy, CUTIN_GLINT_SIZE * size, angle, GLINT_COLOR)
         # nome do golpe entra pelo outro lado, um pouco depois
         name, label = cutin["name"], cutin["label"]
         slide = 1 - (1 - min(1.0, max(0.0, (t - 0.08) / 0.22))) ** 3
@@ -1018,8 +1121,9 @@ class Effects:
 class Match:
     """Partida melhor de 3: lutadores, rounds, placar, efeitos e HUD."""
 
-    def __init__(self, mode, p1_id, p2_id, cpu_diff):
+    def __init__(self, mode, p1_id, p2_id, cpu_diff, local_side=None):
         self.mode = mode
+        self.local_side = local_side   # online: lado de quem joga neste computador (0 = P1, 1 = P2)
         self.characters = (CHARACTERS_BY_ID[p1_id], CHARACTERS_BY_ID[p2_id])
         self.mirror = p1_id == p2_id
         self.cpu_diff = cpu_diff
@@ -1028,6 +1132,10 @@ class Match:
         self.score = [0, 0]
         self.super_carry = [0, 0]   # a barra de SUPER passa de um round para o outro
         self.round_number = 0
+        # relógio de jogo em frames: só anda quando a luta anda (parado na pausa, no hitstop e mais
+        # devagar na câmera lenta). Não usa o relógio do computador, então no online os dois
+        # jogadores contam exatamente o mesmo tempo.
+        self.clock_frames = 0
         self.effects = Effects()
         self.finished = False
         self.winner = None
@@ -1045,7 +1153,7 @@ class Match:
         for f, meter in zip(self.fighters, self.super_carry):
             f.super_meter = meter
         self.intro_count = 3
-        self.last_count_update = pygame.time.get_ticks()
+        self.last_count_update = self.clock_ms()
         self.fight_banner_until = 0
         self.round_over = False
         self.round_over_time = 0
@@ -1057,33 +1165,34 @@ class Match:
         name = self.characters[side]["name"].upper()
         return f"{name} ({self.tags[side]})" if self.mirror else name
 
-    def shift_timers(self, ms):
-        """Empurra os timers para frente (pausa, hitstop, câmera lenta), pra nada pular."""
-        self.last_count_update += ms
-        self.round_over_time += ms
-        self.fight_banner_until += ms
-        for f in self.fighters:
-            f.update_time += ms
-
-    def update(self, dt):
-        """Um frame: aplica hitstop/câmera lenta e avança a lógica quando for a vez."""
+    def update(self, inputs=None):
+        """Um frame: aplica hitstop/câmera lenta e avança a lógica quando for a vez.
+        inputs: (botões do P1, botões do P2) deste frame (online); None = teclado/CPU."""
         fx = self.effects
         fx.update()
-        if fx.hitstop > 0:
+        if fx.hitstop > 0:  # frame congelado: os botões dele não são lidos (igual ao teclado)
             fx.hitstop -= 1
-            self.shift_timers(dt)
             return
         if fx.slowmo > 0:
             fx.slowmo -= 1
             fx.slow_acc += SLOWMO_SCALE
             if fx.slow_acc < 1:
-                self.shift_timers(dt)
                 return
             fx.slow_acc -= 1
-        self.step()
+        self.step(inputs)
 
-    def step(self):
-        now = pygame.time.get_ticks()
+    def checksum(self):
+        """Resumo da luta inteira; no online os dois computadores têm que chegar no mesmo número."""
+        state = (self.round_number, self.score, self.intro_count, self.round_over, self.finished,
+                 self.effects.hitstop, self.effects.slowmo, [f.sync_state() for f in self.fighters])
+        return zlib.crc32(repr(state).encode())
+
+    def clock_ms(self):
+        return self.clock_frames * FRAME_MS
+
+    def step(self, inputs=None):
+        self.clock_frames += 1
+        now = self.clock_ms()
         f1, f2 = self.fighters
         if self.intro_count > 0 and now - self.last_count_update >= 1000:
             self.last_count_update = now
@@ -1092,8 +1201,9 @@ class Match:
                 self.fight_banner_until = now + FIGHT_BANNER_MS
 
         can_act = self.intro_count <= 0 and not self.round_over and not self.finished
-        for attacker, defender in ((f1, f2), (f2, f1)):
-            event = attacker.move(SCREEN_WIDTH, SCREEN_HEIGHT, defender, can_act)
+        for side, (attacker, defender) in enumerate(((f1, f2), (f2, f1))):
+            held = inputs[side] if inputs else None
+            event = attacker.move(SCREEN_WIDTH, SCREEN_HEIGHT, defender, can_act, held)
             if event:
                 self.effects.on_hit(event)
             for signal in attacker.pop_signals():
@@ -1103,6 +1213,10 @@ class Match:
                     self.effects.on_super_impact(attacker, defender)
                 elif signal == "land":
                     self.effects.on_land(attacker)
+                elif signal == "hat_catch":
+                    self.effects.on_hat_catch(attacker)
+            if attacker.hat is not None:
+                self.effects.on_hat_fly(attacker)
         f1.update()
         f2.update()
 
@@ -1154,6 +1268,8 @@ class Match:
         # quem está atacando fica na frente
         for f in sorted(self.fighters, key=lambda fighter: fighter.attacking):
             f.draw(screen, offset)
+        for f in self.fighters:
+            f.draw_hat(screen, offset)
         self.effects.draw(offset)
         self.effects.draw_cutin()
 
@@ -1181,13 +1297,16 @@ class Match:
                 pygame.draw.circle(screen, BLACK, (cx, 88), 11)
                 pygame.draw.circle(screen, YELLOW if i < self.score[side] else DARK_GRAY, (cx, 88), 8)
                 pygame.draw.circle(screen, WHITE, (cx, 88), 10, 2)
-            # tecla do SUPER: só para quem joga no teclado
-            key_label = SUPER_KEYS[side] if self.tags[side] != "CPU" else None
+            # tecla do SUPER: só para quem joga neste teclado
+            if self.mode == MODE_ONLINE:
+                key_label = SUPER_KEYS[0] if side == self.local_side else None
+            else:
+                key_label = SUPER_KEYS[side] if self.tags[side] != "CPU" else None
             draw_super_bar(f, side, key_label)
         draw_text(f"Rodada {self.round_number}", tiny_font, WHITE, SCREEN_WIDTH // 2, 88, "center", shadow=True)
 
     def draw_banners(self):
-        now = pygame.time.get_ticks()
+        now = self.clock_ms()
         if self.intro_count > 0:
             final = self.score == [ROUNDS_TO_WIN - 1] * 2
             draw_banner("RODADA FINAL" if final else f"RODADA {self.round_number}", menu_font, WHITE, 170)
@@ -1213,6 +1332,7 @@ class CharSelect:
 
     1P vs 2P: cada jogador escolhe no seu teclado ao mesmo tempo.
     1P vs CPU: o P1 escolhe o seu lutador e depois o da CPU (e a dificuldade).
+    Online: cada um controla só o seu lado (local_side); o lado do outro vem pela rede (set_remote).
     """
     P1_KEYS = {"prev": (pygame.K_a,), "next": (pygame.K_d,),
                "confirm": (pygame.K_r, pygame.K_t, pygame.K_SPACE)}
@@ -1220,8 +1340,11 @@ class CharSelect:
                "confirm": (pygame.K_n, pygame.K_m, pygame.K_RETURN, pygame.K_KP_ENTER)}
     BACK_KEYS = (pygame.K_ESCAPE, pygame.K_BACKSPACE)
 
-    def __init__(self, mode, picks, difficulty):
+    def __init__(self, mode, picks, difficulty, local_side=None, net_info=None):
         self.mode = mode
+        self.local_side = local_side    # online: 0 (P1) ou 1 (P2)
+        self.net_info = net_info        # online: função que devolve o texto de ping
+        self.remote_known = False       # online: já chegou o estado do outro?
         self.cursor = list(picks)       # índice no elenco de cada lado
         self.locked = [False, False]
         self.lock_order = []            # para desfazer o último "PRONTO" com Esc/Backspace
@@ -1241,6 +1364,8 @@ class CharSelect:
     def can_control(self, side):
         if self.locked[side]:
             return False
+        if self.mode == MODE_ONLINE:
+            return side == self.local_side
         return self.mode == MODE_VERSUS or side == self.active_side()
 
     def cycle(self, side, step):
@@ -1256,8 +1381,10 @@ class CharSelect:
                 self.ready_time = pygame.time.get_ticks()
 
     def unlock(self, side):
-        # no modo CPU só dá para desfazer na ordem inversa (CPU antes do P1)
-        if self.locked[side] and (self.mode == MODE_VERSUS or self.lock_order[-1] == side):
+        # no modo CPU só dá para desfazer na ordem inversa (CPU antes do P1); online, só o seu lado
+        if self.mode == MODE_ONLINE and side != self.local_side:
+            return
+        if self.locked[side] and (self.mode != MODE_CPU or self.lock_order[-1] == side):
             self.locked[side] = False
             self.lock_order.remove(side)
             self.ready_time = None
@@ -1276,6 +1403,19 @@ class CharSelect:
     def ready(self):
         return self.ready_time is not None and pygame.time.get_ticks() - self.ready_time >= READY_FLASH_MS
 
+    def set_remote(self, cursor, locked):
+        """Online: o que o outro jogador está escolhendo (chega pela rede)."""
+        side = 1 - self.local_side
+        self.remote_known = True
+        self.cursor[side] = cursor % len(CHARACTERS)
+        if locked != self.locked[side]:
+            self.locked[side] = locked
+            self.lock_time[side] = pygame.time.get_ticks()
+            if all(self.locked):
+                self.ready_time = pygame.time.get_ticks()
+            elif not locked:
+                self.ready_time = None
+
     def difficulty_key(self):
         return DIFFICULTIES[self.difficulty]
 
@@ -1291,6 +1431,15 @@ class CharSelect:
     def _handle_key(self, key):
         if key in self.BACK_KEYS:
             return None if self.unlock_last() else "back"
+        if self.mode == MODE_ONLINE:  # qualquer um dos dois conjuntos de teclas
+            side = self.local_side
+            if key in self.P1_KEYS["prev"] + self.P2_KEYS["prev"]:
+                self.cycle(side, -1)
+            elif key in self.P1_KEYS["next"] + self.P2_KEYS["next"]:
+                self.cycle(side, 1)
+            elif key in self.P1_KEYS["confirm"] + self.P2_KEYS["confirm"]:
+                self.lock(side)
+            return None
         if self.mode == MODE_CPU:
             side = self.active_side()
             if side is None:
@@ -1373,12 +1522,18 @@ class CharSelect:
 
         # cabeçalho: quem escolhe e o estado
         badge = draw_badge("CPU" if is_cpu else f"P{side + 1}", color, panel.x + 16, panel.y + 14)
-        label = "Computador" if is_cpu else f"Jogador {side + 1}"
+        if self.mode == MODE_ONLINE:
+            label = "Você" if side == self.local_side else "Oponente"
+        else:
+            label = "Computador" if is_cpu else f"Jogador {side + 1}"
         draw_text(label, small_font, WHITE, badge.right + 10, badge.centery, "midleft")
+        remote = self.mode == MODE_ONLINE and side != self.local_side
         if locked:
             status, status_color = "PRONTO!", YELLOW
         elif active:
             status, status_color = "Escolhendo", WHITE if blink else GRAY
+        elif remote:
+            status, status_color = ("Escolhendo", LIGHT_GRAY) if self.remote_known else ("Conectando", GRAY)
         else:
             status, status_color = "Aguarde", GRAY
         draw_text(status, small_font, status_color, panel.right - 16, badge.centery, "midright")
@@ -1392,7 +1547,7 @@ class CharSelect:
             frame = frame.copy()
             glow = int(170 * lock_flash)
             frame.fill((glow, glow, glow), special_flags=pygame.BLEND_RGB_ADD)
-        elif not active and not locked:
+        elif not active and not locked and not remote:
             frame = frame.copy()
             frame.fill((110, 110, 110), special_flags=pygame.BLEND_RGB_MULT)
         sprite_pos = (panel.x + 130 if side == 0 else panel.x + 10, panel.y + 34)
@@ -1428,7 +1583,13 @@ class CharSelect:
 
     def _draw_footer(self, mouse):
         y = SELECT_PANEL_Y + SELECT_PANEL_H + 30
-        if self.mode == MODE_VERSUS:
+        if self.mode == MODE_ONLINE:
+            draw_text("A/D ou Setas trocar  •  Espaço/Enter confirmar", tiny_font, LIGHT_GRAY,
+                      SCREEN_WIDTH // 2, y, "center", shadow=True)
+            hint = "Esc: desfazer / sair da sala"
+            if self.net_info:
+                hint += "  •  " + self.net_info()
+        elif self.mode == MODE_VERSUS:
             draw_text("A/D trocar  •  R/T/Espaço confirmar", tiny_font, LIGHT_GRAY, 250, y, "center", shadow=True)
             draw_text("Setas trocar  •  N/M/Enter confirmar", tiny_font, LIGHT_GRAY, 750, y, "center", shadow=True)
             hint = "Esc/Backspace: desfazer/voltar  •  Clique no painel para confirmar"
@@ -1456,6 +1617,142 @@ class CharSelect:
                 self.areas.append((rect, "diff", i))
 
 
+# ---------------- ONLINE ----------------
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".falido_da_luta.json")  # últimos IP/sala usados
+STALL_NOTICE = 20            # frames travado esperando o outro até mostrar o aviso
+
+
+def game_fingerprint():
+    """Impressão dos arquivos que decidem a luta: no online os dois precisam ter os mesmos
+    (senão cada computador calcularia uma luta diferente)."""
+    crc = 0
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("fighter.py", "main.py", os.path.join("online", "lockstep.py")):
+        with open(os.path.join(here, name), "rb") as f:
+            crc = zlib.crc32(f.read().replace(b"\r", b""), crc)  # tanto faz o fim de linha do git
+    return crc
+
+
+GAME_ID = game_fingerprint()
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(config):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def wrap_text(text, font, width):
+    """Quebra o texto em linhas que cabem na largura."""
+    lines = []
+    for paragraph in text.split("\n"):
+        line = ""
+        for word in paragraph.split(" "):
+            attempt = f"{line} {word}".strip()
+            if line and font.size(attempt)[0] > width:
+                lines.append(line)
+                line = word
+            else:
+                line = attempt
+        lines.append(line)
+    return lines
+
+
+class TextForm:
+    """Tela com campos de texto (IP, servidor, código da sala).
+    Tab/setas trocam de campo, Enter conecta, Esc volta, Ctrl+V cola."""
+
+    def __init__(self, title, fields, notes):
+        self.title = title
+        self.fields = [list(field) for field in fields]   # [rótulo, valor, tamanho máximo]
+        self.notes = notes
+        self.active = 0
+        self.error = ""
+        self.areas = []
+
+    def values(self):
+        return [field[1].strip() for field in self.fields]
+
+    def handle_event(self, event):
+        """Retorna "ok" (conectar), "back" (voltar) ou None."""
+        field = self.fields[self.active]
+        if event.type == pygame.TEXTINPUT:
+            field[1] = (field[1] + event.text)[:field[2]]
+            self.error = ""
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                return "back"
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                return "ok"
+            if event.key == pygame.K_BACKSPACE:
+                field[1] = field[1][:-1]
+                self.error = ""
+            elif event.key in (pygame.K_TAB, pygame.K_DOWN):
+                self.active = (self.active + 1) % len(self.fields)
+            elif event.key == pygame.K_UP:
+                self.active = (self.active - 1) % len(self.fields)
+            elif event.key == pygame.K_v and event.mod & pygame.KMOD_CTRL:
+                field[1] = (field[1] + self._clipboard())[:field[2]]
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for rect, action in self.areas:
+                if rect.collidepoint(event.pos):
+                    if isinstance(action, int):
+                        self.active = action
+                    else:
+                        return action
+        return None
+
+    @staticmethod
+    def _clipboard():
+        try:
+            text = pygame.scrap.get_text() or ""
+        except (AttributeError, pygame.error):
+            return ""
+        return text.strip().splitlines()[0] if text.strip() else ""
+
+    def draw(self):
+        now = pygame.time.get_ticks()
+        mouse = pygame.mouse.get_pos()
+        self.areas = []
+        screen.fill(BLACK)
+        screen.blit(menu_image, (0, 0))
+        draw_text(self.title, menu_font, YELLOW, SCREEN_WIDTH // 2, 70, "center", shadow=True)
+        y = 150
+        for i, (label, value, _) in enumerate(self.fields):
+            draw_text(label, small_font, LIGHT_GRAY, 200, y)
+            box = pygame.Rect(200, y + 30, 600, 48)
+            active = i == self.active
+            pygame.draw.rect(screen, (20, 20, 28), box, border_radius=8)
+            pygame.draw.rect(screen, YELLOW if active else GRAY, box, 3 if active else 2, border_radius=8)
+            cursor = "|" if active and (now // 450) % 2 == 0 else ""
+            draw_text(value + cursor, score_font, WHITE, box.x + 14, box.centery, "midleft")
+            self.areas.append((box, i))
+            y += 110
+        if self.error:
+            for k, line in enumerate(wrap_text(self.error, small_font, 760)):
+                draw_text(line, small_font, (255, 110, 110), SCREEN_WIDTH // 2, y + k * 26, "center", shadow=True)
+            y += 26 * (k + 1) + 8
+        for k, line in enumerate(self.notes):
+            draw_text(line, tiny_font, LIGHT_GRAY, SCREEN_WIDTH // 2, y + 10 + k * 24, "center", shadow=True)
+        for label, action, x in (("Conectar", "ok", 620), ("Voltar", "back", 380)):
+            hover = pygame.Rect(0, 0, 200, 50).move(x - 100, 520 - 25).collidepoint(mouse)
+            rect = draw_text(label, menu_font, YELLOW if hover else WHITE, x, 520, "center", shadow=True)
+            self.areas.append((rect.inflate(20, 10), action))
+        draw_text("Enter: conectar  •  Tab: trocar de campo  •  Ctrl+V: colar  •  Esc: voltar", tiny_font, GRAY,
+                  SCREEN_WIDTH // 2, 578, "center", shadow=True)
+
+
 # ---------------- JOGO ----------------
 CONTROL_HINTS = (
     "P1:  A/D andar  •  W pular  •  R/T golpes  •  Y super",
@@ -1463,10 +1760,24 @@ CONTROL_HINTS = (
     "Toque para trás na hora do golpe: PARRY  •  Dois toques numa direção: dash",
     "F1 hitboxes  •  F11 tela cheia",
 )
+ONLINE_HINTS = (
+    "Você joga com qualquer um dos dois conjuntos de teclas:",
+    "A/D ou Setas andar  •  W ou Cima pular  •  R/T ou N/M golpes  •  Y ou Vírgula super",
+    CONTROL_HINTS[2],
+    "No online a luta não para enquanto este menu está aberto.",
+)
+ONLINE_MENU_NOTES = (
+    "Criar sala: você espera e passa o seu IP para o amigo (mesma rede, VPN ou porta aberta).",
+    "Entrar pelo IP: digite o IP de quem criou a sala.",
+    "Sala no servidor: os dois usam o mesmo servidor e o mesmo código (ninguém abre porta).",
+    "Guia completo: online/COMO_JOGAR_ONLINE.md",
+)
 
 
 class Game:
-    """Máquina de estados: MAIN_MENU -> CHAR_SELECT -> FIGHT <-> PAUSE -> MATCH_OVER."""
+    """Máquina de estados: MAIN_MENU -> CHAR_SELECT -> FIGHT <-> PAUSE -> MATCH_OVER.
+    Online: MAIN_MENU -> ONLINE_MENU -> (ONLINE_FORM) -> ONLINE_WAIT -> ONLINE_SELECT -> FIGHT
+    -> MATCH_OVER -> ONLINE_SELECT... (ONLINE_ERROR quando a conexão cai)."""
 
     def __init__(self):
         self.state = MAIN_MENU
@@ -1478,18 +1789,39 @@ class Game:
         self.match = None
         self.selected = 0            # opção destacada no menu do estado atual
         self.option_rects = []
-        self.pause_start = 0
+        # online
+        self.config = load_config()
+        self.session = None
+        self.form = None
+        self.form_kind = None        # "join" ou "relay"
+        self.online_menu = False     # menu aberto por cima da luta online (a luta continua)
+        self.message = ("", "")      # (título, texto) da tela de aviso
+        self.note = None             # aviso rápido na seleção online (ex.: luta dessincronizada)
+        self.wait_started = 0
+        self.local_ips = []
 
     def set_state(self, state):
         self.state = state
         self.selected = 0
         self.option_rects = []
 
+    @property
+    def online(self):
+        return self.mode == MODE_ONLINE
+
     def menu_options(self):
         if self.state == MAIN_MENU:
-            return ["1P vs CPU", "1P vs 2P", fullscreen_label(), "Sair"]
+            return ["1P vs CPU", "1P vs 2P", "Online", fullscreen_label(), "Sair"]
+        if self.state == ONLINE_MENU:
+            return ["Criar sala", "Entrar pelo IP", "Sala no servidor", "Voltar"]
+        if self.state == ONLINE_ERROR:
+            return ["OK"]
+        if self.state == FIGHT:  # só com o menu do online aberto
+            return ["Continuar", "Sair da sala"]
         if self.state == PAUSE:
             return ["Continuar", "Trocar lutadores", fullscreen_label(), "Menu principal"]
+        if self.online:
+            return ["Revanche", "Sair da sala"]
         return ["Revanche", "Trocar lutadores", "Menu principal"]
 
     # ---------- transições ----------
@@ -1505,12 +1837,99 @@ class Game:
 
     def pause_game(self):
         self.set_state(PAUSE)
-        self.pause_start = pygame.time.get_ticks()
 
     def resume_game(self):
-        """Despausa e 'empurra' os timers para frente, pra contagem/animações não pularem."""
-        self.match.shift_timers(pygame.time.get_ticks() - self.pause_start)
+        self.set_state(FIGHT)  # o relógio da luta só anda com ela rodando: nada pula
+
+    # ---------- online: conectar ----------
+    def open_form(self, kind):
+        self.form_kind = kind
+        if kind == "join":
+            self.form = TextForm("Entrar pelo IP", [["IP de quem criou a sala (ex.: 192.168.0.10)",
+                                                     self.config.get("ip", ""), 60]],
+                                 ["Mesma rede: o IP que aparece na tela de quem criou.",
+                                  "Pela internet: IP da VPN (Radmin, Tailscale, ZeroTier) ou o IP público",
+                                  f"de quem abriu a porta UDP {DEFAULT_PORT} no roteador."])
+        else:
+            self.form = TextForm("Sala no servidor", [["Servidor (ex.: meuservidor.com ou 1.2.3.4)",
+                                                       self.config.get("servidor", ""), 60],
+                                                      ["Código da sala (o mesmo para os dois)",
+                                                       self.config.get("sala", ""), 16]],
+                                 ["O servidor roda online/servidor_relay.py numa máquina com IP público.",
+                                  "Quem chegar primeiro na sala é o P1."])
+        self.set_state(ONLINE_FORM)
+
+    def submit_form(self):
+        try:
+            if self.form_kind == "join":
+                (text,) = self.form.values()
+                address = parse_address(text, DEFAULT_PORT)
+                self.config["ip"] = text
+                session = NetSession.join(GAME_ID, address)
+            else:
+                server_text, code = self.form.values()
+                server = parse_address(server_text, RELAY_PORT)
+                code = code.upper()
+                if not code:
+                    raise ValueError("Escolha um código para a sala (ex.: FALIDOS).")
+                self.config["servidor"], self.config["sala"] = server_text, code
+                session = NetSession.relay(GAME_ID, server, code)
+        except ValueError as error:
+            self.form.error = str(error)
+            return
+        save_config(self.config)
+        self.begin_session(session)
+
+    def start_host(self):
+        self.begin_session(NetSession.host(GAME_ID))
+
+    def begin_session(self, session):
+        self.session = session
+        self.mode = MODE_ONLINE
+        if session.closed:
+            self.show_error("Não deu para criar a sala", session.close_reason)
+            return
+        self.wait_started = pygame.time.get_ticks()
+        self.local_ips = local_addresses() if session.role == 1 and session.server is None else []
+        self.set_state(ONLINE_WAIT)
+
+    def open_online_select(self):
+        self.select = CharSelect(MODE_ONLINE, self.picks, self.difficulty,
+                                 local_side=self.session.role - 1, net_info=self.net_info)
+        self.set_state(ONLINE_SELECT)
+
+    def start_online_match(self, go):
+        p1, p2, _ = go
+        self.picks = [p1, p2]
+        self.match = Match(MODE_ONLINE, CHARACTERS[p1]["id"], CHARACTERS[p2]["id"], self.difficulty,
+                           local_side=self.session.role - 1)
+        self.online_menu = False
+        self.note = None
         self.set_state(FIGHT)
+
+    def leave_online(self, state=ONLINE_MENU):
+        if self.session is not None:
+            self.session.close()
+            self.session = None
+        self.online_menu = False
+        self.set_state(state)
+
+    def show_error(self, title, text):
+        if self.session is not None:
+            self.session.close()
+            self.session = None
+        self.message = (title, text or "A conexão foi encerrada.")
+        self.online_menu = False
+        self.set_state(ONLINE_ERROR)
+
+    def net_info(self):
+        session = self.session
+        if session is None:
+            return ""
+        text = f"Ping {round(session.rtt_ms)} ms"
+        if self.state == FIGHT and session.lockstep:
+            text += f"  •  atraso dos botões {session.lockstep.delay} frames"
+        return text
 
     # ---------- eventos ----------
     @staticmethod
@@ -1528,11 +1947,30 @@ class Game:
         elif self.state == CHAR_SELECT:
             if self.select.handle_event(event) == "back":
                 self.set_state(MAIN_MENU)
+        elif self.state == ONLINE_SELECT:
+            if self.select.handle_event(event) == "back":
+                self.leave_online()
+        elif self.state == ONLINE_FORM:
+            action = self.form.handle_event(event)
+            if action == "ok":
+                self.submit_form()
+            elif action == "back":
+                self.set_state(ONLINE_MENU)
+        elif self.state == ONLINE_WAIT:
+            if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
+                self.leave_online()
         elif self.state == FIGHT:
-            if self.is_pause_toggle(event) or event.type == pygame.WINDOWFOCUSLOST:
-                self.pause_game()
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_F1:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_F1:
                 fighter_module.DEBUG = not fighter_module.DEBUG  # mostra hitboxes
+            elif self.online:
+                # online não pausa (o outro continua jogando): o menu abre por cima da luta
+                if self.is_pause_toggle(event):
+                    self.online_menu = not self.online_menu
+                    self.selected = 0
+                elif self.online_menu:
+                    self.handle_menu_choice(event)
+            elif self.is_pause_toggle(event) or event.type == pygame.WINDOWFOCUSLOST:
+                self.pause_game()
         elif self.state == PAUSE and self.is_pause_toggle(event):
             self.resume_game()
         else:
@@ -1548,45 +1986,188 @@ class Game:
             self.open_char_select(MODE_CPU)
         elif escolha == "1P vs 2P":
             self.open_char_select(MODE_VERSUS)
+        elif escolha == "Online":
+            self.set_state(ONLINE_MENU)
+        elif escolha == "Criar sala":
+            self.start_host()
+        elif escolha == "Entrar pelo IP":
+            self.open_form("join")
+        elif escolha == "Sala no servidor":
+            self.open_form("relay")
+        elif escolha == "Voltar":
+            self.set_state(MAIN_MENU)
+        elif escolha == "OK":
+            self.set_state(ONLINE_MENU)
         elif escolha == "Sair":
             self.running = False
         elif escolha == "Continuar":
-            self.resume_game()
+            if self.state == FIGHT:
+                self.online_menu = False
+            else:
+                self.resume_game()
+        elif escolha == "Sair da sala":
+            self.leave_online()
         elif escolha == "Trocar lutadores":
             self.open_char_select(self.mode)
         elif escolha == "Revanche":
-            self.start_match()
+            if self.online:
+                self.open_online_select()  # os dois escolhem de novo (pode repetir o lutador)
+            else:
+                self.start_match()
         elif escolha == "Menu principal":
             self.set_state(MAIN_MENU)
 
     # ---------- lógica ----------
-    def update(self, dt):
+    def update(self):
+        if self.online and self.session is not None:
+            self.update_online()
+            return
         if self.state == CHAR_SELECT and self.select.ready():
             self.picks = list(self.select.cursor)
             self.difficulty = self.select.difficulty_key()
             self.start_match()
         elif self.state in (FIGHT, MATCH_OVER):  # na pausa tudo fica congelado
-            self.match.update(dt)
+            self.match.update()
             if self.state == FIGHT and self.match.finished:
                 self.set_state(MATCH_OVER)
 
+    def local_buttons(self):
+        """Botões deste computador no online (qualquer um dos dois conjuntos de teclas)."""
+        if self.online_menu:
+            return 0  # navegando no menu: o lutador fica parado
+        return pack_buttons(keyboard_buttons(CONTROLS[1], CONTROLS[2]))
+
+    def update_online(self):
+        session = self.session
+        session.poll()
+        if session.closed:
+            self.show_error("Conexão encerrada", session.close_reason)
+            return
+        if self.state == ONLINE_WAIT and session.connected:
+            self.open_online_select()
+        elif self.state == ONLINE_SELECT:
+            select = self.select
+            side = select.local_side
+            session.set_select(select.cursor[side], select.locked[side])
+            if session.remote_select is not None:
+                select.set_remote(*session.remote_select)
+            if session.role == 1 and select.ready():
+                session.start_match(*select.cursor)  # o anfitrião manda começar (e já começa abaixo)
+            go = session.take_go()
+            if go:
+                self.start_online_match(go)
+        elif self.state == FIGHT:
+            match = self.match
+            session.step_match(self.local_buttons(),
+                               lambda p1, p2: match.update((unpack_buttons(p1), unpack_buttons(p2))),
+                               match.checksum)
+            if session.lockstep.desync_frame is not None:
+                self.open_online_select()
+                self.note = ("A luta dessincronizou (os dois computadores calcularam lutas diferentes) "
+                             "e foi interrompida. Confiram se os dois têm a mesma versão do jogo.")
+            elif match.finished:
+                self.online_menu = False
+                self.set_state(MATCH_OVER)
+        elif self.state == MATCH_OVER:
+            self.match.update()  # só a animação local; a luta já acabou nos dois
+
     # ---------- desenho ----------
     def draw(self):
-        if self.state == MAIN_MENU:
-            screen.fill(BLACK)
-            screen.blit(menu_image, (0, 0))
-            draw_text("Falido da Luta", title_font, RED, SCREEN_WIDTH // 2, 150, "center", shadow=True)
-            self.option_rects = draw_options(self.menu_options(), self.selected, 285)
+        if self.state in (MAIN_MENU, ONLINE_MENU, ONLINE_ERROR):
+            self.draw_menu_screen()
         elif self.state == CHAR_SELECT:
             self.select.draw()
+        elif self.state == ONLINE_SELECT:
+            self.select.draw()
+            if self.note:
+                self.draw_note(self.note)
+        elif self.state == ONLINE_FORM:
+            self.form.draw()
+        elif self.state == ONLINE_WAIT:
+            self.draw_waiting()
         else:
             self.match.draw()
             if self.state == FIGHT:
-                draw_pause_button(PAUSE_BUTTON.collidepoint(pygame.mouse.get_pos()))
+                if self.online:
+                    self.draw_online_fight()
+                else:
+                    draw_pause_button(PAUSE_BUTTON.collidepoint(pygame.mouse.get_pos()))
             elif self.state == PAUSE:
                 self.draw_pause_menu()
             else:
                 self.draw_match_over()
+
+    def draw_menu_screen(self):
+        screen.fill(BLACK)
+        screen.blit(menu_image, (0, 0))
+        if self.state == MAIN_MENU:
+            draw_text("Falido da Luta", title_font, RED, SCREEN_WIDTH // 2, 150, "center", shadow=True)
+            self.option_rects = draw_options(self.menu_options(), self.selected, 270, spacing=66)
+        elif self.state == ONLINE_MENU:
+            draw_text("Online", title_font, YELLOW, SCREEN_WIDTH // 2, 110, "center", shadow=True)
+            self.option_rects = draw_options(self.menu_options(), self.selected, 220, spacing=66)
+            for i, line in enumerate(ONLINE_MENU_NOTES):
+                draw_text(line, tiny_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 482 + i * 24, "center", shadow=True)
+        else:
+            title, text = self.message
+            draw_text(title, menu_font, RED, SCREEN_WIDTH // 2, 150, "center", shadow=True)
+            for i, line in enumerate(wrap_text(text, score_font, 820)):
+                draw_text(line, score_font, WHITE, SCREEN_WIDTH // 2, 240 + i * 40, "center", shadow=True)
+            self.option_rects = draw_options(self.menu_options(), self.selected, 470)
+
+    def draw_waiting(self):
+        session = self.session
+        screen.fill(BLACK)
+        screen.blit(menu_image, (0, 0))
+        dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
+        seconds = (pygame.time.get_ticks() - self.wait_started) // 1000
+        lines = []
+        if session.state == "linking":
+            title = "Conectado! Medindo a conexão" + dots
+        elif session.state == "room":
+            title = f"Na sala {session.room_code}" + dots
+            lines = ["Esperando o outro jogador entrar com o mesmo código.",
+                     f"Servidor: {session.server[0]}:{session.server[1]}"]
+        elif session.role == 1 and session.server is None:
+            title = "Sala criada! Esperando o oponente" + dots
+            lines = ["Passe para o seu amigo um destes endereços:"]
+            lines += list(self.local_ips) or ["(não achei o IP desta máquina)"]
+            lines += ["", f"Porta UDP {session.port}.  Pela internet: VPN (Radmin, Tailscale, ZeroTier)",
+                      "ou abra essa porta no roteador e passe o seu IP público."]
+        elif session.role == 1:
+            title = "Oponente encontrado! Conectando" + dots
+        else:
+            title = "Conectando" + dots
+            if session.server is None:
+                lines = [f"Endereço: {session.peer[0]}:{session.peer[1]}", f"{seconds} s"]
+        draw_text(title, menu_font, YELLOW, SCREEN_WIDTH // 2, 120, "center", shadow=True)
+        for i, line in enumerate(lines):
+            font = score_font if line[:1].isdigit() and "." in line and " " not in line else small_font
+            draw_text(line, font, WHITE, SCREEN_WIDTH // 2, 210 + i * 36, "center", shadow=True)
+        draw_text("Esc: cancelar", small_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 560, "center", shadow=True)
+
+    def draw_note(self, text):
+        lines = wrap_text(text, small_font, 860)
+        band = pygame.Surface((SCREEN_WIDTH, 30 * len(lines) + 20), pygame.SRCALPHA)
+        band.fill((90, 0, 0, 210))
+        screen.blit(band, (0, 470 - 10))
+        for i, line in enumerate(lines):
+            draw_text(line, small_font, WHITE, SCREEN_WIDTH // 2, 470 + i * 30, "midtop", shadow=True)
+
+    def draw_online_fight(self):
+        session = self.session
+        draw_text(self.net_info(), tiny_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 112, "center", shadow=True)
+        if session.lockstep.stalled > STALL_NOTICE:
+            draw_banner("Esperando o oponente" + "." * (1 + (pygame.time.get_ticks() // 400) % 3),
+                        menu_font, WHITE, 200)
+        if self.online_menu:
+            screen.blit(pause_overlay, (0, 0))
+            draw_text("PARTIDA ONLINE", title_font, YELLOW, SCREEN_WIDTH // 2, 130, "center", shadow=True)
+            self.option_rects = draw_options(self.menu_options(), self.selected, 260)
+            for i, hint in enumerate(ONLINE_HINTS):
+                draw_text(hint, tiny_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 578 - (len(ONLINE_HINTS) - 1 - i) * 22,
+                          "center", shadow=True)
+        draw_pause_button(self.online_menu or PAUSE_BUTTON.collidepoint(pygame.mouse.get_pos()))
 
     def draw_pause_menu(self):
         screen.blit(pause_overlay, (0, 0))
@@ -1601,11 +2182,15 @@ class Game:
     def draw_match_over(self):
         match = self.match
         screen.blit(pause_overlay, (0, 0))
-        draw_text(f"{match.fighter_label(match.winner)} venceu!", title_font, YELLOW,
-                  SCREEN_WIDTH // 2, 140, "center", shadow=True)
-        quem = {"P1": "Jogador 1", "P2": "Jogador 2", "CPU": "Computador"}[match.tags[match.winner]]
-        if match.mode == MODE_CPU:
-            quem += "  •  " + DIFFICULTY_LABELS[match.cpu_diff]
+        if match.mode == MODE_ONLINE:
+            title = "Você venceu!" if match.winner == match.local_side else "Você perdeu!"
+            quem = f"{match.fighter_label(match.winner)} venceu"
+        else:
+            title = f"{match.fighter_label(match.winner)} venceu!"
+            quem = {"P1": "Jogador 1", "P2": "Jogador 2", "CPU": "Computador"}[match.tags[match.winner]]
+            if match.mode == MODE_CPU:
+                quem += "  •  " + DIFFICULTY_LABELS[match.cpu_diff]
+        draw_text(title, title_font, YELLOW, SCREEN_WIDTH // 2, 140, "center", shadow=True)
         draw_text(f"{quem}  •  Placar {match.score[0]} x {match.score[1]}", score_font, WHITE,
                   SCREEN_WIDTH // 2, 215, "center", shadow=True)
         self.option_rects = draw_options(self.menu_options(), self.selected, 320)
@@ -1613,12 +2198,14 @@ class Game:
     # ---------- loop ----------
     def run(self):
         while self.running:
-            dt = relogio.tick(FPS)  # limita a 60 FPS
+            relogio.tick(FPS)  # limita a 60 FPS
             for event in pygame.event.get():
                 self.handle_event(event)
-            self.update(dt)
+            self.update()
             self.draw()
             pygame.display.flip()
+        if self.session is not None:
+            self.session.close()
         pygame.quit()
 
 

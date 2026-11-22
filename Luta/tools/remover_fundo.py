@@ -3,10 +3,12 @@
 Uso (dentro da pasta Luta):
     python tools/remover_fundo.py entrada.png saida.png
 
-Reconhece sozinho dois tipos de fundo:
+Reconhece sozinho os tipos de fundo:
 - XADREZ desenhado (cinza/branco, claro ou escuro, mesmo irregular): personagem com contorno
   escuro fica opaco; aura/brilho fica semitransparente;
-- BRANCO liso (render 3D sem contorno): o corpo (pele, roupa, cabelo) fica opaco com a borda
+- BRANCO liso com desenho de CONTORNO escuro (estilo HQ): o que o contorno fecha fica opaco;
+  brilho, faísca e rastro (sem contorno) ficam semitransparentes;
+- BRANCO liso sem contorno (render 3D): o corpo (pele, roupa, cabelo) fica opaco com a borda
   recortada suave; linhas de efeito cinza (vibração, ondas) ficam semitransparentes.
 
 O ideal continua sendo gerar já com fundo transparente de verdade (PNG); use isto quando não der.
@@ -40,6 +42,8 @@ BODY_THICK = 4         # parte mais fina que ~2x isso (px) é linha de efeito, n
 BODY_MIN = 200         # pedaço de corpo menor que isso (px) é sujeira
 EDGE = 2               # borda do corpo (px) recortada com transparência suave
 FX_FLOOR = 0.06        # linhas de efeito: alfa abaixo disso vira 0
+OUTLINED = 0.7         # borda do corpo com mais que isso perto de contorno escuro = desenho com contorno
+SOFT_LINE_LUM = 180    # traço médio (contorno de objeto brilhando) também fecha área opaca
 
 
 def box_mean(arr, size):
@@ -150,18 +154,58 @@ def remove_checker(rgb, dark, light):
 
 
 # ---------------- BRANCO LISO ----------------
-def remove_white(rgb):
-    lum = luminance(rgb)
+def white_background(rgb):
+    """O branco ligado à borda da imagem + áreas brancas grandes fechadas pelo corpo (vão entre
+    o braço e o tronco). Branco pequeno fechado (meia, lente, brilho do olho) é do personagem."""
     sat = rgb.max(axis=2) - rgb.min(axis=2)
-
-    # fundo: o branco ligado à borda da imagem + áreas brancas grandes fechadas pelo corpo
     white = (rgb.min(axis=2) > WHITE_MIN) & (sat < WHITE_SAT)
     labels, count = ndimage.label(white)
     index = np.arange(1, count + 1)
     sizes = ndimage.sum(white, labels, index=index)
     edges = np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
     keep = np.union1d(np.unique(edges[edges > 0]), index[sizes > WHITE_HOLE])
-    background = np.isin(labels, keep)
+    return np.isin(labels, keep)
+
+
+def dark_lines(rgb):
+    lum = luminance(rgb)
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
+    return (lum < OUTLINE_LUM) & (sat < AURA_SAT)
+
+
+def fx_alpha(rgb):
+    """Efeito por cima do branco (brilho, faísca, linha): "cor para alfa" contra o branco."""
+    alpha, color = color_to_alpha(rgb, np.full(3, 255.0))
+    return np.clip((alpha - FX_FLOOR) / (1 - FX_FLOOR), 0, 1), color
+
+
+def remove_white_outlined(rgb):
+    """Desenho com contorno escuro: o contorno e o que ele cerca ficam opacos (a borda
+    antisserrilhada de fora vira alfa sozinha); o resto é efeito semitransparente.
+    Objeto brilhando (chapéu ciano) tem o contorno mais claro, apagado pela luz: um traço médio
+    sem cor forte também fecha área opaca, mas só por dentro (a borda dele continua suave)."""
+    background = white_background(rgb)
+    line = dark_lines(rgb)
+    outline = ndimage.binary_closing(line, structure=np.ones((3, 3)), iterations=2)
+    closed = ndimage.binary_closing(line, structure=np.ones((3, 3)), iterations=OUTLINE_CLOSE)
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
+    soft = (luminance(rgb) < SOFT_LINE_LUM) & (sat < AURA_SAT)
+    soft_closed = ndimage.binary_closing(soft, structure=np.ones((3, 3)), iterations=3)
+    inside_soft = ndimage.binary_erosion(ndimage.binary_fill_holes(soft_closed), iterations=EDGE)
+    solid = (outline | ndimage.binary_fill_holes(closed) | inside_soft) & ~background
+    solid = ndimage.binary_opening(solid, structure=np.ones((2, 2)))
+
+    alpha, color = fx_alpha(rgb)
+    alpha = np.where(solid, 1.0, np.where(background, 0.0, alpha))
+    out = np.zeros(rgb.shape[:2] + (4,), dtype=np.uint8)
+    out[..., :3] = np.where(solid[..., None], rgb, np.clip(color, 0, 255))
+    out[..., 3] = np.round(alpha * 255)
+    return out
+
+
+def remove_white(rgb):
+    background = white_background(rgb)
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
 
     # corpo: o que não é branco e forma mancha larga; linhas de efeito são finas e ficam de fora.
     # (cor não serve: o jeans tem partes cinza quase sem cor, iguais às linhas de efeito)
@@ -186,9 +230,8 @@ def remove_white(rgb):
     to_pixel, to_body = 255 - rgb, 255 - inside_color
     alpha_band = np.clip((to_pixel * to_body).sum(axis=2) / np.maximum((to_body ** 2).sum(axis=2), 1), 0, 1)
 
-    # linhas de efeito (vibração, ondas): "cor para alfa" contra o branco
-    alpha_fx, color_fx = color_to_alpha(rgb, np.full(3, 255.0))
-    alpha_fx = np.clip((alpha_fx - FX_FLOOR) / (1 - FX_FLOOR), 0, 1)
+    # linhas de efeito (vibração, ondas)
+    alpha_fx, color_fx = fx_alpha(rgb)
 
     alpha = np.where(inner, 1.0, np.where(band, alpha_band, np.where(background, 0.0, alpha_fx)))
     color = np.where((inner | band)[..., None], np.where(inner[..., None], rgb, inside_color), color_fx)
@@ -196,6 +239,17 @@ def remove_white(rgb):
     out[..., :3] = np.clip(color, 0, 255)
     out[..., 3] = np.round(alpha * 255)
     return out
+
+
+def is_outlined(rgb, plain):
+    """Desenho com contorno: quase toda a borda do corpo (achado pelo modo sem contorno) fica
+    colada num traço escuro. No render 3D só o cabelo e a roupa escura encostam na borda."""
+    solid = plain[..., 3] == 255
+    edge = solid & ~ndimage.binary_erosion(solid)
+    if not edge.any():
+        return False
+    near_line = ndimage.binary_dilation(dark_lines(rgb), iterations=3)
+    return near_line[edge].mean() > OUTLINED
 
 
 def is_checker(rgb, dark, light):
@@ -215,7 +269,10 @@ def remove_background(rgb):
     dark, light = background_tones(rgb)
     if is_checker(rgb, dark, light):
         return remove_checker(rgb, dark, light), "xadrez"
-    return remove_white(rgb), "branco liso"
+    plain = remove_white(rgb)
+    if is_outlined(rgb, plain):
+        return remove_white_outlined(rgb), "branco liso, desenho com contorno"
+    return plain, "branco liso"
 
 
 def main():
