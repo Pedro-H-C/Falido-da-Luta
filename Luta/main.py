@@ -2,7 +2,8 @@ import json
 import math
 import os
 import random
-import socket
+import secrets
+import sys
 import unicodedata
 import zlib
 
@@ -14,6 +15,11 @@ from online import DEFAULT_PORT, RELAY_PORT, NetSession, local_addresses, parse_
 from fighter import (CHARACTERS, CHARACTERS_BY_ID, CONTROLS, DASH_COST, DIFFICULTIES, DIFFICULTY_LABELS, FRAME_MS,
                      GROUND_MARGIN, SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_frames, get_sounds,
                      get_super_fx, keyboard_buttons, pack_buttons, preload_characters, unpack_buttons)
+
+# Pasta do jogo: no .exe (PyInstaller) os arquivos ficam em sys._MEIPASS; rodando o .py, é a pasta
+# dele. Os caminhos "assets/..." são relativos a ela, então o jogo abre de qualquer lugar.
+BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+os.chdir(BASE_DIR)
 
 audio.pre_init()
 pygame.init()
@@ -1648,22 +1654,41 @@ class CharSelect:
 
 
 # ---------------- ONLINE ----------------
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".falido_da_luta.json")  # últimos IP/sala usados
+# Servidor de salas (online/servidor_relay.py rodando no Oracle Cloud): IP ou nome, e a porta
+# se não for a padrão (ex.: "1.2.3.4" ou "1.2.3.4:6000"). Vazio = online desligado.
+ONLINE_SERVER = ""
+ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # sem 0/O e 1/I, que se confundem
+ROOM_CODE_LEN = 4
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".falido_da_luta.json")  # último IP digitado
 STALL_NOTICE = 20            # frames travado esperando o outro até mostrar o aviso
+
+
+FINGERPRINT_FILES = ("fighter.py", "main.py", os.path.join("online", "lockstep.py"))
 
 
 def game_fingerprint():
     """Impressão dos arquivos que decidem a luta: no online os dois precisam ter os mesmos
-    (senão cada computador calcularia uma luta diferente)."""
+    (senão cada computador calcularia uma luta diferente). No .exe esses arquivos vão junto como
+    dados (tools/gerar_jogo.py), então o .exe e o jogo rodado pelo .py se reconhecem."""
     crc = 0
-    here = os.path.dirname(os.path.abspath(__file__))
-    for name in ("fighter.py", "main.py", os.path.join("online", "lockstep.py")):
-        with open(os.path.join(here, name), "rb") as f:
+    for name in FINGERPRINT_FILES:
+        with open(os.path.join(BASE_DIR, name), "rb") as f:
             crc = zlib.crc32(f.read().replace(b"\r", b""), crc)  # tanto faz o fim de linha do git
     return crc
 
 
 GAME_ID = game_fingerprint()
+
+
+def online_server():
+    """Endereço do servidor de salas. ValueError com o motivo se não estiver configurado."""
+    if not ONLINE_SERVER:
+        raise ValueError("O servidor do online ainda não foi configurado (ONLINE_SERVER no main.py).")
+    return parse_address(ONLINE_SERVER, RELAY_PORT)
+
+
+def new_room_code():
+    return "".join(secrets.choice(ROOM_CODE_CHARS) for _ in range(ROOM_CODE_LEN))
 
 
 def load_config():
@@ -1681,6 +1706,17 @@ def save_config(config):
             json.dump(config, f, ensure_ascii=False, indent=2)
     except OSError:
         pass
+
+
+def address_label(ip):
+    """De que rede é o IP, para quem criou a sala saber qual passar."""
+    if ip.startswith("26."):
+        return "Radmin VPN"
+    if ip.startswith("100."):
+        return "Tailscale"
+    if ip.startswith(("192.168.", "10.")) or any(ip.startswith(f"172.{n}.") for n in range(16, 32)):
+        return "mesma rede / Wi-Fi"
+    return "outra rede"
 
 
 def wrap_text(text, font, width):
@@ -1804,11 +1840,10 @@ ONLINE_HINTS = (
     CONTROL_HINTS[2],
     "No online a luta não para enquanto este menu está aberto.",
 )
+ONLINE_SERVER_NOTE = "Criar sala / Entrar com código: pelo servidor do jogo, sem configurar nada."
 ONLINE_MENU_NOTES = (
-    "Criar sala: você espera e passa o seu IP para o amigo (mesma rede, VPN ou porta aberta).",
-    "Entrar pelo IP: digite o IP de quem criou a sala.",
-    "Sala no servidor: os dois usam o mesmo servidor e o mesmo código (ninguém abre porta).",
-    "Guia completo: online/COMO_JOGAR_ONLINE.md",
+    "Direta: os dois na mesma rede do Radmin VPN (ou no mesmo Wi-Fi); quem cria passa o IP.",
+    "Os dois precisam estar com a mesma versão do jogo.",
 )
 
 
@@ -1828,15 +1863,15 @@ class Game:
         self.selected = 0            # opção destacada no menu do estado atual
         self.option_rects = []
         # online
-        self.config = load_config()
         self.session = None
         self.form = None
-        self.form_kind = None        # "join" ou "relay"
+        self.form_kind = None        # "code" (código da sala) ou "ip" (direto)
+        self.config = load_config()
+        self.local_ips = []          # sala direta: IPs desta máquina para passar ao amigo
         self.online_menu = False     # menu aberto por cima da luta online (a luta continua)
         self.message = ("", "")      # (título, texto) da tela de aviso
         self.note = None             # aviso rápido na seleção online (ex.: luta dessincronizada)
         self.wait_started = 0
-        self.local_ips = []
         audio.music("menu")
 
     def set_state(self, state):
@@ -1861,7 +1896,8 @@ class Game:
         if self.state == MAIN_MENU:
             return ["1P vs CPU", "1P vs 2P", "Online", fullscreen_label(), "Sair"]
         if self.state == ONLINE_MENU:
-            return ["Criar sala", "Entrar pelo IP", "Sala no servidor", "Voltar"]
+            server = ["Criar sala", "Entrar com código"] if ONLINE_SERVER else []
+            return server + ["Criar sala direta", "Entrar pelo IP", "Voltar"]
         if self.state == ONLINE_ERROR:
             return ["OK"]
         if self.state == FIGHT:  # só com o menu do online aberto
@@ -1892,45 +1928,47 @@ class Game:
     # ---------- online: conectar ----------
     def open_form(self, kind):
         self.form_kind = kind
-        if kind == "join":
-            self.form = TextForm("Entrar pelo IP", [["IP de quem criou a sala (ex.: 192.168.0.10)",
+        if kind == "ip":
+            self.form = TextForm("Entrar pelo IP", [["IP de quem criou a sala (ex.: 26.12.34.56)",
                                                      self.config.get("ip", ""), 60]],
-                                 ["Mesma rede: o IP que aparece na tela de quem criou.",
-                                  "Pela internet: IP da VPN (Radmin, Tailscale, ZeroTier) ou o IP público",
-                                  f"de quem abriu a porta UDP {DEFAULT_PORT} no roteador."])
+                                 ["Radmin VPN: o IP do amigo na rede do Radmin (começa com 26.).",
+                                  "Mesmo Wi-Fi: o IP que aparece na tela de quem criou a sala."])
         else:
-            self.form = TextForm("Sala no servidor", [["Servidor (ex.: meuservidor.com ou 1.2.3.4)",
-                                                       self.config.get("servidor", ""), 60],
-                                                      ["Código da sala (o mesmo para os dois)",
-                                                       self.config.get("sala", ""), 16]],
-                                 ["O servidor roda online/servidor_relay.py numa máquina com IP público.",
-                                  "Quem chegar primeiro na sala é o P1."])
+            self.form = TextForm("Entrar com código", [["Código da sala", "", 8]],
+                                 ["Quem criou a sala vê o código na tela.",
+                                  "Quem cria a sala é o P1 (esquerda); quem entra é o P2 (direita)."])
         self.set_state(ONLINE_FORM)
 
     def submit_form(self):
+        (text,) = self.form.values()
         try:
-            if self.form_kind == "join":
-                (text,) = self.form.values()
+            if self.form_kind == "ip":
                 address = parse_address(text, DEFAULT_PORT)
                 self.config["ip"] = text
+                save_config(self.config)
                 session = NetSession.join(GAME_ID, address)
             else:
-                server_text, code = self.form.values()
-                server = parse_address(server_text, RELAY_PORT)
-                code = code.upper()
+                code = text.upper().replace(" ", "")
                 if not code:
-                    raise ValueError("Escolha um código para a sala (ex.: FALIDOS).")
-                self.config["servidor"], self.config["sala"] = server_text, code
-                session = NetSession.relay(GAME_ID, server, code)
+                    raise ValueError("Digite o código da sala.")
+                session = NetSession.relay(GAME_ID, online_server(), code, create=False)
         except ValueError as error:
             self.form.error = str(error)
             audio.play("error")
             return
-        save_config(self.config)
         self.begin_session(session)
 
-    def start_host(self):
+    def create_direct_room(self):
+        """Sala sem servidor: este computador espera o amigo chegar pelo IP (Radmin, mesmo Wi-Fi)."""
         self.begin_session(NetSession.host(GAME_ID))
+
+    def create_room(self):
+        try:
+            server = online_server()
+        except ValueError as error:
+            self.show_error("Online indisponível", str(error))
+            return
+        self.begin_session(NetSession.relay(GAME_ID, server, new_room_code(), create=True))
 
     def begin_session(self, session):
         self.session = session
@@ -1939,7 +1977,9 @@ class Game:
             self.show_error("Não deu para criar a sala", session.close_reason)
             return
         self.wait_started = pygame.time.get_ticks()
-        self.local_ips = local_addresses() if session.role == 1 and session.server is None else []
+        if session.role == 1 and session.server is None:
+            # Radmin primeiro: é o IP que o amigo de fora vai usar
+            self.local_ips = sorted(local_addresses(), key=lambda ip: not ip.startswith("26."))
         self.set_state(ONLINE_WAIT)
 
     def open_online_select(self):
@@ -2049,11 +2089,13 @@ class Game:
         elif escolha == "Online":
             self.set_state(ONLINE_MENU)
         elif escolha == "Criar sala":
-            self.start_host()
+            self.create_room()
+        elif escolha == "Entrar com código":
+            self.open_form("code")
+        elif escolha == "Criar sala direta":
+            self.create_direct_room()
         elif escolha == "Entrar pelo IP":
-            self.open_form("join")
-        elif escolha == "Sala no servidor":
-            self.open_form("relay")
+            self.open_form("ip")
         elif escolha == "Voltar":
             self.set_state(MAIN_MENU)
         elif escolha == "OK":
@@ -2166,10 +2208,13 @@ class Game:
             draw_text("Falido da Luta", title_font, RED, SCREEN_WIDTH // 2, 150, "center", shadow=True)
             self.option_rects = draw_options(self.menu_options(), self.selected, 270, spacing=66)
         elif self.state == ONLINE_MENU:
-            draw_text("Online", title_font, YELLOW, SCREEN_WIDTH // 2, 110, "center", shadow=True)
-            self.option_rects = draw_options(self.menu_options(), self.selected, 220, spacing=66)
-            for i, line in enumerate(ONLINE_MENU_NOTES):
-                draw_text(line, tiny_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 482 + i * 24, "center", shadow=True)
+            draw_text("Online", title_font, YELLOW, SCREEN_WIDTH // 2, 100, "center", shadow=True)
+            options = self.menu_options()
+            spacing = 66 if len(options) <= 3 else 54
+            self.option_rects = draw_options(options, self.selected, 200, spacing=spacing)
+            notes = ((ONLINE_SERVER_NOTE,) if ONLINE_SERVER else ()) + ONLINE_MENU_NOTES
+            for i, line in enumerate(notes):
+                draw_text(line, tiny_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 488 + i * 24, "center", shadow=True)
         else:
             title, text = self.message
             draw_text(title, menu_font, RED, SCREEN_WIDTH // 2, 150, "center", shadow=True)
@@ -2182,30 +2227,41 @@ class Game:
         screen.fill(BLACK)
         screen.blit(menu_image, (0, 0))
         dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
-        seconds = (pygame.time.get_ticks() - self.wait_started) // 1000
-        lines = []
+        lines = []                   # (texto, fonte, cor)
         if session.state == "linking":
             title = "Conectado! Medindo a conexão" + dots
+        elif session.state == "room" and not session.server_ok:
+            title = ("Criando a sala" if session.creating else "Procurando a sala") + dots
+            lines = [("Conectando ao servidor.", small_font, WHITE)]
+        elif session.state == "room" and session.creating:
+            title = "Sala criada! Esperando o amigo" + dots
+            lines = [("Código da sala:", small_font, WHITE),
+                     (session.room_code, title_font, YELLOW),
+                     ("Passe esse código para o seu amigo.", small_font, WHITE),
+                     ("Ele escolhe Online e depois Entrar com código.", small_font, WHITE)]
         elif session.state == "room":
-            title = f"Na sala {session.room_code}" + dots
-            lines = ["Esperando o outro jogador entrar com o mesmo código.",
-                     f"Servidor: {session.server[0]}:{session.server[1]}"]
-        elif session.role == 1 and session.server is None:
-            title = "Sala criada! Esperando o oponente" + dots
-            lines = ["Passe para o seu amigo um destes endereços:"]
-            lines += list(self.local_ips) or ["(não achei o IP desta máquina)"]
-            lines += ["", f"Porta UDP {session.port}.  Pela internet: VPN (Radmin, Tailscale, ZeroTier)",
-                      "ou abra essa porta no roteador e passe o seu IP público."]
-        elif session.role == 1:
-            title = "Oponente encontrado! Conectando" + dots
-        else:
+            title = f"Procurando a sala {session.room_code}" + dots
+        elif session.state == "waiting" and session.server is None:
+            title = "Sala direta criada! Esperando o amigo" + dots
+            lines = [("Passe para o seu amigo o seu IP:", small_font, WHITE)]
+            lines += [(f"{ip}   ({address_label(ip)})", score_font, YELLOW) for ip in self.local_ips]
+            if not self.local_ips:
+                lines.append(("(não achei o IP desta máquina)", small_font, RED))
+            lines += [("Ele escolhe Online e depois Entrar pelo IP.", small_font, WHITE),
+                      ("Se o Windows perguntar, permita o acesso à rede (marque as redes públicas).",
+                       tiny_font, LIGHT_GRAY)]
+        elif session.state == "connecting" and session.server is None:
+            seconds = (pygame.time.get_ticks() - self.wait_started) // 1000
             title = "Conectando" + dots
-            if session.server is None:
-                lines = [f"Endereço: {session.peer[0]}:{session.peer[1]}", f"{seconds} s"]
+            lines = [(f"IP {session.peer[0]}", score_font, WHITE), (f"{seconds} s", small_font, LIGHT_GRAY)]
+        else:
+            title = "Amigo encontrado! Conectando" + dots
         draw_text(title, menu_font, YELLOW, SCREEN_WIDTH // 2, 120, "center", shadow=True)
-        for i, line in enumerate(lines):
-            font = score_font if line[:1].isdigit() and "." in line and " " not in line else small_font
-            draw_text(line, font, WHITE, SCREEN_WIDTH // 2, 210 + i * 36, "center", shadow=True)
+        y = 210
+        for text, font, color in lines:
+            height = font.get_height()
+            draw_text(text, font, color, SCREEN_WIDTH // 2, y + height // 2, "center", shadow=True)
+            y += height + 14
         draw_text("Esc: cancelar", small_font, LIGHT_GRAY, SCREEN_WIDTH // 2, 560, "center", shadow=True)
 
     def draw_note(self, text):

@@ -1,0 +1,32 @@
+FALIDO DA LUTA
+==============
+
+COMO ABRIR
+- Descompacte o .zip inteiro (não abra direto de dentro do .zip).
+- Abra a pasta FalidoDaLuta e dê dois cliques em FalidoDaLuta.exe.
+- Se aparecer "O Windows protegeu o computador": clique em "Mais informações" e depois em
+  "Executar assim mesmo". Isso acontece porque o jogo não tem assinatura digital (é paga),
+  não porque tenha vírus.
+- Na primeira vez que usar o Online, o Windows pode perguntar se o jogo pode usar a rede:
+  clique em "Permitir".
+
+CONTROLES
+- P1: A/D andar, W pular, R/T golpes, Y super
+- P2: Setas andar e pular, N/M golpes, Vírgula super
+- Toque para trás na hora do golpe: PARRY. Dois toques numa direção: dash.
+- Esc: pausa. F11: tela cheia.
+
+ONLINE (direto, pelo Radmin VPN)
+- Os dois instalam o Radmin VPN (grátis) e entram na mesma rede dele.
+  No mesmo Wi-Fi não precisa do Radmin.
+- Um escolhe Online > Criar sala direta e passa para o outro o IP que aparece
+  (o do Radmin começa com 26.).
+- O outro escolhe Online > Entrar pelo IP e digita esse IP.
+- Se o Windows perguntar, permita o acesso à rede (marque também as redes públicas).
+- Os dois jogadores precisam estar com a mesma versão do jogo.
+
+CRÉDITOS
+- Músicas: Kevin MacLeod (incompetech.com)
+  Licença Creative Commons: By Attribution 4.0 (creativecommons.org/licenses/by/4.0/)
+  "Curse of the Scarab" (luta) e a música do menu.
+- Sons de interface: Kenney (www.kenney.nl), licença CC0.

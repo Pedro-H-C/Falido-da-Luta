@@ -1,16 +1,16 @@
 """Conexão com o outro jogador por UDP, sem travar o jogo: o socket não bloqueia e tudo que
 chegou é lido uma vez por frame em poll().
 
-Três jeitos de conectar:
-- host(): cria a sala e espera na porta DEFAULT_PORT (o amigo precisa alcançar essa porta:
-  mesma rede, VPN como Radmin/Tailscale/ZeroTier, ou porta aberta no roteador);
-- join(endereço): entra na sala de quem criou, pelo IP;
-- relay(servidor, código): os dois entram numa sala com o mesmo código num servidor de salas
-  (online/servidor_relay.py), que repassa os pacotes; ninguém precisa abrir porta.
+O jogo conecta pelo servidor de salas (online/servidor_relay.py): relay(servidor, código,
+create=True) cria a sala, relay(..., create=False) entra nela, e o servidor repassa os pacotes
+entre os dois (ninguém precisa abrir porta no roteador).
+Ou direto, sem servidor ("Criar sala direta" / "Entrar pelo IP" no jogo): host() espera na porta
+DEFAULT_PORT e join(endereço) entra pelo IP. Serve quando os dois se alcançam: mesma rede do
+Radmin VPN (ou Tailscale/ZeroTier), mesmo Wi-Fi, ou porta aberta no roteador.
 
-Estados: "waiting" (anfitrião esperando), "connecting" (entrando), "room" (esperando o par no
-servidor), "linking" (medindo o ping), "ready" (conectado) e "closed" (acabou; ver close_reason).
-O anfitrião é sempre o P1 e quem entrou é o P2.
+Estados: "room" (falando com o servidor / esperando o par), "waiting" (anfitrião esperando o
+"oi" do outro), "connecting" (entrando), "linking" (medindo o ping), "ready" (conectado) e
+"closed" (acabou; ver close_reason). Quem criou a sala é sempre o P1 e quem entrou é o P2.
 """
 import random
 import socket
@@ -28,6 +28,7 @@ PING_SLOW = 0.5          # s entre pings depois de conectado
 PING_SAMPLES = 6
 TIMEOUT = 8.0            # s sem notícia do outro = conexão perdida
 JOIN_TIMEOUT = 20.0      # s tentando entrar numa sala que não responde
+SERVER_TIMEOUT = 8.0     # s sem nenhuma resposta do servidor de salas
 MIN_DELAY, MAX_DELAY = 2, 9
 AHEAD = 1.0              # frames na frente do outro a partir dos quais vale segurar...
 AHEAD_WAIT_EVERY = 4     # ... um frame a cada tantos
@@ -89,6 +90,8 @@ class NetSession:
         self.peer = None               # para onde mandar (o outro jogador ou o servidor de salas)
         self.server = None
         self.room_code = ""
+        self.creating = False          # servidor de salas: True = criou a sala, False = entrou
+        self.server_ok = False         # o servidor já respondeu
         self.port = None
         self.close_reason = None
         self.rtt_ms = 0.0
@@ -135,11 +138,13 @@ class NetSession:
         return session
 
     @classmethod
-    def relay(cls, game_id, server, code, **sim):
+    def relay(cls, game_id, server, code, create, **sim):
+        """Sala no servidor: create=True cria a sala com esse código, False entra nela."""
         session = cls(game_id, **sim)
         session.sock.bind(("0.0.0.0", 0))
         session.server = server
         session.room_code = code
+        session.creating = create
         session.state = "room"
         return session
 
@@ -152,10 +157,12 @@ class NetSession:
         return self.state == "ready"
 
     def close(self, reason=None):
-        """Sai da sala avisando o outro (algumas vezes, caso um pacote se perca)."""
-        if self.peer is not None and self.state in ("linking", "ready"):
+        """Sai da sala avisando o outro, ou o servidor de salas (algumas vezes, caso um pacote se
+        perca): assim a sala é desfeita na hora."""
+        target = self.server if self.server is not None else self.peer
+        if target is not None and (self.state in ("linking", "ready") or self.server is not None):
             for _ in range(3):
-                self._raw_send(proto.bye(), self.peer)
+                self._raw_send(proto.bye(), target)
         self._close(reason)
 
     def _close(self, reason):
@@ -214,11 +221,17 @@ class NetSession:
             self._periodic(now)
 
     def _periodic(self, now):
-        if self.state == "room" and self._due("room", RESEND, now):
-            self._send(proto.room(self.room_code), self.server)
+        if self.state == "room":
+            if not self.server_ok and now - self.started > SERVER_TIMEOUT:
+                self._close("O servidor do online não respondeu. Confira a sua internet; se ela "
+                            "estiver boa, o servidor pode estar fora do ar.")
+            elif self._due("room", RESEND, now):
+                kind = proto.CREATE if self.creating else proto.JOIN
+                self._send(proto.room(kind, self.room_code), self.server)
         elif self.state == "connecting":
             if now - self.started > JOIN_TIMEOUT:
-                self._close("Ninguém respondeu nesse endereço. Confira o IP e se a sala foi criada.")
+                self._close("Ninguém respondeu nesse endereço. Confira o IP, se a sala foi criada e, no "
+                            "Radmin, se os dois estão na mesma rede e com o Radmin ligado.")
             elif self._due("hello", RESEND, now):
                 self._send(proto.hello(self.game_id))
         elif self.state in ("linking", "ready"):
@@ -245,12 +258,15 @@ class NetSession:
         if kind is None:
             return
         if self.state == "room":
-            if kind == proto.PAIRED and address == self.server:
+            if address != self.server:
+                return
+            self.server_ok = True
+            if kind == proto.PAIRED:
                 self.peer = self.server
                 self.role = proto.read_paired(data)
                 self.state = "waiting" if self.role == 1 else "connecting"
                 self.started = now
-            elif kind == proto.REJECT and address == self.server:
+            elif kind == proto.REJECT:
                 self._close(proto.read_text(data))
             return
         if self.state == "waiting":

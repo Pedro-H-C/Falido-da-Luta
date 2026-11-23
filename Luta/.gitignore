@@ -1,0 +1,5 @@
+# saída do tools/gerar_jogo.py
+build/
+dist/
+# arquivos que o Python gera sozinho
+__pycache__/

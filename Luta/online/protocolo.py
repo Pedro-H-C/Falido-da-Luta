@@ -24,8 +24,10 @@ GO = b"G"        # anfitrião -> os dois: número da luta, lutador do P1, lutado
 # luta
 INPUTS = b"I"    # número da luta, ack, primeiro frame, conferência (frame, crc), vantagem, botões
 # servidor de salas (o servidor repassa todo o resto de um jogador para o outro)
-ROOM = b"R"      # jogador -> servidor: código da sala
-PAIRED = b"r"    # servidor -> jogador: a sala encheu; papel 1 (anfitrião, P1) ou 2 (P2)
+CREATE = b"C"    # jogador -> servidor: cria a sala com este código e espera (repetido até parear)
+JOIN = b"J"      # jogador -> servidor: entra na sala com este código
+ROOM_OK = b"o"   # servidor -> quem criou: sala criada, esperando o outro
+PAIRED = b"r"    # servidor -> jogador: a sala encheu; papel 1 (quem criou, P1) ou 2 (quem entrou, P2)
 
 _HELLO = struct.Struct("<HI")
 _PING = struct.Struct("<d")
@@ -111,8 +113,13 @@ def read_inputs(data):
     return match_no, ack, first, check_frame, check, advantage, data[3 + _INPUTS.size:]
 
 
-def room(code):
-    return MAGIC + ROOM + code.encode("utf-8")[:32]
+def room(kind, code):
+    """Pedido ao servidor de salas: kind CREATE ou JOIN."""
+    return MAGIC + kind + code.encode("utf-8")[:32]
+
+
+def room_ok():
+    return _pack(ROOM_OK)
 
 
 def paired(role):

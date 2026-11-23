@@ -1,51 +1,80 @@
 # Como jogar o Falido da Luta online
 
-Cada jogador roda o jogo no próprio computador. No menu principal escolha **Online**.
+Tem dois jeitos: **direto** (pelo Radmin VPN ou no mesmo Wi-Fi, funciona sem servidor nenhum)
+e **pelo servidor de salas** (com código, sem instalar nada; só aparece no menu quando o jogo
+tem um servidor configurado).
 
-## Antes de tudo
+## Jogar direto (Radmin VPN ou mesmo Wi-Fi)
+
+1. Os dois instalam o **Radmin VPN** (grátis, sem cadastro) e entram na **mesma rede** dele: um
+   cria a rede (Rede > Criar rede, com nome e senha) e o outro entra nela (Rede > Entrar em
+   uma rede existente). No mesmo Wi-Fi não precisa do Radmin.
+2. Um escolhe **Online > Criar sala direta**. A tela mostra os IPs dele; o do Radmin começa
+   com `26.`.
+3. O outro escolhe **Online > Entrar pelo IP** e digita esse IP (o jogo lembra o último).
+4. Se o Windows perguntar se o jogo pode usar a rede, clique em **Permitir** marcando também
+   as redes **públicas** (o Windows costuma tratar a rede do Radmin como pública).
+
+Se não conectar: confira se o Radmin está ligado nos dois, se estão na mesma rede dele (o
+amigo aparece online na lista) e se o Windows não bloqueou o jogo no firewall.
+
+## Jogar pelo servidor (código da sala)
+
+1. Os dois jogadores abrem o jogo e escolhem **Online**.
+2. Um escolhe **Criar sala**. O jogo mostra um código de 4 letras (ex.: `B4MU`).
+3. Ele passa o código para o amigo, que escolhe **Entrar com código** e digita esse código.
+4. Os dois escolhem os lutadores e a luta começa.
+
+Detalhes:
 
 - Os dois precisam ter **exatamente a mesma versão** do jogo (a mesma pasta `Luta`). Se os
   arquivos da luta forem diferentes, o jogo recusa a conexão e avisa.
-- Na primeira vez, o Windows pode perguntar se o Python pode usar a rede: clique em **Permitir**
-  (marque redes privadas e públicas).
-- Quem **cria a sala** é sempre o P1 (esquerda); quem **entra** é o P2 (direita).
+- Quem **cria a sala** é o P1 (esquerda); quem **entra** é o P2 (direita).
 - Os dois conjuntos de teclas funcionam no online: A/D ou setas, W ou cima, R/T ou N/M, Y ou vírgula.
 - No online a luta não pausa: o Esc abre um menu por cima, mas a luta continua.
+- Na primeira vez, o Windows pode perguntar se o Python pode usar a rede: clique em **Permitir**.
+- Ninguém precisa abrir porta no roteador nem instalar VPN: os dois falam com o servidor de salas.
 
-## Jeito 1: VPN (mais fácil pela internet)
+## O servidor de salas
 
-Programas gratuitos como **Radmin VPN**, **Tailscale** ou **ZeroTier** fazem os dois computadores
-parecerem estar na mesma rede, sem mexer no roteador.
+O jogo encontra o amigo por um servidor na internet que roda `servidor_relay.py`. Ele só junta
+os dois jogadores pelo código e repassa os pacotes; a luta é calculada nos computadores dos
+jogadores. Só precisa de Python (não precisa de pygame): bastam `servidor_relay.py` e
+`protocolo.py`. Usa a porta **UDP 50506**.
 
-1. Os dois instalam o mesmo programa e entram na mesma rede dele.
-2. Um escolhe **Criar sala**. A tela mostra os IPs da máquina; use o da VPN
-   (Radmin costuma começar com `26.`, Tailscale com `100.`).
-3. O outro escolhe **Entrar pelo IP** e digita esse IP.
+O endereço do servidor fica no jogo, em `ONLINE_SERVER` no começo da parte ONLINE do `main.py`.
+Vazio, o online avisa que não está configurado.
 
-Na mesma casa (mesmo Wi-Fi) é igual, sem VPN: use o IP que aparece na tela (ex.: `192.168.0.10`).
+### Onde ele roda
 
-## Jeito 2: abrir a porta no roteador
+Numa máquina grátis do **Oracle Cloud** ("Always Free"), região São Paulo:
 
-1. Quem vai criar a sala abre (redireciona) a porta **UDP 50505** no roteador para o IP local
-   do computador (o que aparece na tela da sala).
-2. Descobre o IP público (pesquise "qual meu ip") e passa para o amigo.
-3. O amigo escolhe **Entrar pelo IP** e digita esse IP público.
+1. Conta criada em oracle.com/br/cloud/free com a região inicial **Brazil East (Sao Paulo)**.
+2. Máquina: Compute > Instances > Create instance, imagem **Ubuntu**, shape **Always Free**
+   (VM.Standard.E2.1.Micro ou VM.Standard.A1.Flex), com IP público e a chave SSH baixada.
+3. Porta liberada no painel: na Security List da subnet, regra de entrada **UDP 50506** vinda
+   de `0.0.0.0/0`.
 
-Muitas operadoras usam CGNAT, e aí abrir a porta não adianta. Nesse caso use a VPN ou o servidor.
+### Instalar ou atualizar
 
-## Jeito 3: servidor de salas
-
-Um computador com IP público (um VPS, ou o PC de alguém que consiga abrir a porta) roda:
+No PowerShell, na pasta `Luta`, com o IP da máquina e o arquivo da chave:
 
 ```
-python online/servidor_relay.py
+.\online\enviar_servidor.ps1 -IP 1.2.3.4 -Chave C:\oracle\ssh-key.key
 ```
 
-Ele usa a porta **UDP 50506** e só precisa de Python (não precisa de pygame, nem do jogo
-inteiro: bastam `servidor_relay.py` e `protocolo.py`). Depois os dois jogadores escolhem
-**Sala no servidor**, digitam o endereço desse servidor e o **mesmo código de sala**
-(qualquer palavra, ex.: `FALIDOS`). Quem chegar primeiro é o P1. Os pacotes passam pelo
-servidor, então o ping fica um pouco maior que na conexão direta.
+Ele manda os arquivos e roda `instalar_servidor.sh` na máquina, que libera a porta no firewall
+do Ubuntu e instala o serviço `falido-relay` (liga sozinho com a máquina e volta se cair).
+Rode de novo sempre que `servidor_relay.py` ou `protocolo.py` mudarem. Mudanças só na luta
+(`fighter.py`, `main.py`) não precisam de nada no servidor.
+
+Conferir o servidor (entrando com `ssh -i C:\oracle\ssh-key.key ubuntu@1.2.3.4`):
+
+- `systemctl status falido-relay` mostra se está rodando;
+- `journalctl -u falido-relay -f` mostra as salas sendo criadas (Ctrl+C para sair).
+
+Se o jogo disser que o servidor não respondeu: confira a regra UDP 50506 na Security List, se o
+serviço está rodando e se o IP em `ONLINE_SERVER` é o da máquina.
 
 ## Como funciona (para quem mexer no código)
 
@@ -58,6 +87,9 @@ servidor, então o ping fica um pouco maior que na conexão direta.
   interrompida com o aviso "dessincronizou".
 - Por isso a lógica da luta (`fighter.py` e a classe `Match` do `main.py`) precisa ser
   **determinística**: nada de relógio do computador (`pygame.time.get_ticks`) nem de `random`
-  em coisa que muda a luta. Efeitos visuais (faíscas, tremor) podem usar os dois à vontade.
+  em coisa que muda a luta. Efeitos visuais e sons podem usar os dois à vontade.
 - Arquivos: `protocolo.py` (formato dos pacotes), `sessao.py` (conexão, ping, seleção),
-  `lockstep.py` (troca de botões e conferência), `servidor_relay.py` (servidor de salas).
+  `lockstep.py` (troca de botões e conferência), `servidor_relay.py` (servidor de salas),
+  `instalar_servidor.sh` e `enviar_servidor.ps1` (instalação do servidor).
+- A sala direta é `NetSession.host` (espera na porta UDP 50505) e `NetSession.join` (entra pelo
+  IP); a sala no servidor é `NetSession.relay`.
