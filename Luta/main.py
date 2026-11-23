@@ -8,13 +8,16 @@ import zlib
 
 import pygame
 
+import audio
 import fighter as fighter_module
 from online import DEFAULT_PORT, RELAY_PORT, NetSession, local_addresses, parse_address
 from fighter import (CHARACTERS, CHARACTERS_BY_ID, CONTROLS, DASH_COST, DIFFICULTIES, DIFFICULTY_LABELS, FRAME_MS,
-                     GROUND_MARGIN, SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_frames, get_super_fx,
-                     keyboard_buttons, pack_buttons, preload_characters, unpack_buttons)
+                     GROUND_MARGIN, SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_frames, get_sounds,
+                     get_super_fx, keyboard_buttons, pack_buttons, preload_characters, unpack_buttons)
 
+audio.pre_init()
 pygame.init()
+audio.setup()
 
 SCREEN_WIDTH = 1000
 SCREEN_HEIGHT = 600
@@ -69,6 +72,7 @@ LAUNCH_HITSTOP_FRAMES = 6            # lançamento do SUPER aéreo
 KO_HITSTOP_FRAMES = 16
 SUPER_FREEZE_FRAMES = 36             # o jogo congela com a tela escura quando alguém solta o SUPER
 SUPER_DIM_ALPHA = 200
+SIGNAL_SOUNDS = {"atk1": "atk1", "atk2": "atk2", "super_start": "super"}  # aviso do lutador -> som dele
 SLOWMO_FRAMES = 70                   # duração da câmera lenta do nocaute (frames reais)
 SLOWMO_SCALE = 0.35                  # o jogo anda a 35% da velocidade
 SHAKE_MARGIN = 12                    # sobra do fundo para o tremor não mostrar bordas
@@ -335,8 +339,21 @@ def draw_options(options, selected, start_y, spacing=75):
     return rects
 
 
+BACK_CHOICES = ("Voltar", "Sair", "Sair da sala", "Menu principal")
+
+
 def handle_menu_event(event, options, rects, selected):
     """Navegação por teclado/mouse. Retorna (nova seleção, opção escolhida ou None)."""
+    before = selected
+    selected, choice = _menu_navigation(event, options, rects, selected)
+    if choice is not None:
+        audio.play("back" if choice in BACK_CHOICES else "confirm")
+    elif selected != before:
+        audio.play("hover")
+    return selected, choice
+
+
+def _menu_navigation(event, options, rects, selected):
     choice = None
     if event.type == pygame.KEYDOWN:
         if event.key in (pygame.K_UP, pygame.K_w):
@@ -613,6 +630,7 @@ class Effects:
     def on_hit(self, event):
         x, y = event.pos
         if event.kind == "parry":
+            audio.play("parry")
             self.hitstop = max(self.hitstop, PARRY_HITSTOP_FRAMES)
             # as faíscas voltam na direção de quem atacou
             self._burst(x, y, -event.direction, PARRY_COLORS, 24, (4, 12), 1.4)
@@ -1153,6 +1171,7 @@ class Match:
         for f, meter in zip(self.fighters, self.super_carry):
             f.super_meter = meter
         self.intro_count = 3
+        audio.play("count")
         self.last_count_update = self.clock_ms()
         self.fight_banner_until = 0
         self.round_over = False
@@ -1197,6 +1216,7 @@ class Match:
         if self.intro_count > 0 and now - self.last_count_update >= 1000:
             self.last_count_update = now
             self.intro_count -= 1
+            audio.play("count" if self.intro_count else "fight")
             if self.intro_count == 0:
                 self.fight_banner_until = now + FIGHT_BANNER_MS
 
@@ -1207,6 +1227,9 @@ class Match:
             if event:
                 self.effects.on_hit(event)
             for signal in attacker.pop_signals():
+                if signal in SIGNAL_SOUNDS:
+                    name = SIGNAL_SOUNDS[signal]
+                    audio.play_fighter(get_sounds(attacker.character["id"]).get(name), side, name)
                 if signal == "super_start":
                     self.effects.on_super_start(attacker)
                 elif signal == "super_impact":
@@ -1371,9 +1394,11 @@ class CharSelect:
     def cycle(self, side, step):
         if self.can_control(side):
             self.cursor[side] = (self.cursor[side] + step) % len(CHARACTERS)
+            audio.play("hover")
 
     def lock(self, side):
         if self.can_control(side):
+            audio.play("ready")
             self.locked[side] = True
             self.lock_order.append(side)
             self.lock_time[side] = pygame.time.get_ticks()
@@ -1385,6 +1410,7 @@ class CharSelect:
         if self.mode == MODE_ONLINE and side != self.local_side:
             return
         if self.locked[side] and (self.mode != MODE_CPU or self.lock_order[-1] == side):
+            audio.play("back")
             self.locked[side] = False
             self.lock_order.remove(side)
             self.ready_time = None
@@ -1398,7 +1424,10 @@ class CharSelect:
 
     def set_difficulty(self, index):
         if self.mode == MODE_CPU and not self.locked[1]:
-            self.difficulty = max(0, min(len(DIFFICULTIES) - 1, index))
+            index = max(0, min(len(DIFFICULTIES) - 1, index))
+            if index != self.difficulty:
+                audio.play("hover")
+            self.difficulty = index
 
     def ready(self):
         return self.ready_time is not None and pygame.time.get_ticks() - self.ready_time >= READY_FLASH_MS
@@ -1409,6 +1438,7 @@ class CharSelect:
         self.remote_known = True
         self.cursor[side] = cursor % len(CHARACTERS)
         if locked != self.locked[side]:
+            audio.play("ready" if locked else "back")
             self.locked[side] = locked
             self.lock_time[side] = pygame.time.get_ticks()
             if all(self.locked):
@@ -1690,24 +1720,32 @@ class TextForm:
         if event.type == pygame.TEXTINPUT:
             field[1] = (field[1] + event.text)[:field[2]]
             self.error = ""
+            audio.play("type")
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 return "back"
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 return "ok"
             if event.key == pygame.K_BACKSPACE:
+                if field[1]:
+                    audio.play("type")
                 field[1] = field[1][:-1]
                 self.error = ""
             elif event.key in (pygame.K_TAB, pygame.K_DOWN):
                 self.active = (self.active + 1) % len(self.fields)
+                audio.play("hover")
             elif event.key == pygame.K_UP:
                 self.active = (self.active - 1) % len(self.fields)
+                audio.play("hover")
             elif event.key == pygame.K_v and event.mod & pygame.KMOD_CTRL:
                 field[1] = (field[1] + self._clipboard())[:field[2]]
+                audio.play("type")
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             for rect, action in self.areas:
                 if rect.collidepoint(event.pos):
                     if isinstance(action, int):
+                        if action != self.active:
+                            audio.play("hover")
                         self.active = action
                     else:
                         return action
@@ -1799,8 +1837,18 @@ class Game:
         self.note = None             # aviso rápido na seleção online (ex.: luta dessincronizada)
         self.wait_started = 0
         self.local_ips = []
+        audio.music("menu")
 
     def set_state(self, state):
+        # sons da luta (o do SUPER dura segundos): param com a pausa e acabam ao sair da luta
+        if state == PAUSE:
+            audio.pause_fighters()
+        elif state == FIGHT and self.state == PAUSE:
+            audio.resume_fighters()
+        elif state != MATCH_OVER:
+            audio.stop_fighters()
+        audio.music("fight" if state in (FIGHT, PAUSE, MATCH_OVER) else "menu")
+        audio.duck_music(state == PAUSE)
         self.state = state
         self.selected = 0
         self.option_rects = []
@@ -1876,6 +1924,7 @@ class Game:
                 session = NetSession.relay(GAME_ID, server, code)
         except ValueError as error:
             self.form.error = str(error)
+            audio.play("error")
             return
         save_config(self.config)
         self.begin_session(session)
@@ -1919,6 +1968,7 @@ class Game:
             self.session.close()
             self.session = None
         self.message = (title, text or "A conexão foi encerrada.")
+        audio.play("error")
         self.online_menu = False
         self.set_state(ONLINE_ERROR)
 
@@ -1946,18 +1996,23 @@ class Game:
             toggle_fullscreen()
         elif self.state == CHAR_SELECT:
             if self.select.handle_event(event) == "back":
+                audio.play("back")
                 self.set_state(MAIN_MENU)
         elif self.state == ONLINE_SELECT:
             if self.select.handle_event(event) == "back":
+                audio.play("back")
                 self.leave_online()
         elif self.state == ONLINE_FORM:
             action = self.form.handle_event(event)
             if action == "ok":
+                audio.play("confirm")
                 self.submit_form()
             elif action == "back":
+                audio.play("back")
                 self.set_state(ONLINE_MENU)
         elif self.state == ONLINE_WAIT:
             if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
+                audio.play("back")
                 self.leave_online()
         elif self.state == FIGHT:
             if event.type == pygame.KEYDOWN and event.key == pygame.K_F1:
@@ -1967,11 +2022,16 @@ class Game:
                 if self.is_pause_toggle(event):
                     self.online_menu = not self.online_menu
                     self.selected = 0
+                    audio.play("pause" if self.online_menu else "resume")
                 elif self.online_menu:
                     self.handle_menu_choice(event)
-            elif self.is_pause_toggle(event) or event.type == pygame.WINDOWFOCUSLOST:
+            elif self.is_pause_toggle(event):
+                audio.play("pause")
+                self.pause_game()
+            elif event.type == pygame.WINDOWFOCUSLOST:
                 self.pause_game()
         elif self.state == PAUSE and self.is_pause_toggle(event):
+            audio.play("resume")
             self.resume_game()
         else:
             self.handle_menu_choice(event)
@@ -2044,6 +2104,7 @@ class Game:
             self.show_error("Conexão encerrada", session.close_reason)
             return
         if self.state == ONLINE_WAIT and session.connected:
+            audio.play("connected")
             self.open_online_select()
         elif self.state == ONLINE_SELECT:
             select = self.select
@@ -2062,6 +2123,7 @@ class Game:
                                lambda p1, p2: match.update((unpack_buttons(p1), unpack_buttons(p2))),
                                match.checksum)
             if session.lockstep.desync_frame is not None:
+                audio.play("error")
                 self.open_online_select()
                 self.note = ("A luta dessincronizou (os dois computadores calcularam lutas diferentes) "
                              "e foi interrompida. Confiram se os dois têm a mesma versão do jogo.")
@@ -2202,6 +2264,7 @@ class Game:
             for event in pygame.event.get():
                 self.handle_event(event)
             self.update()
+            audio.update()
             self.draw()
             pygame.display.flip()
         if self.session is not None:

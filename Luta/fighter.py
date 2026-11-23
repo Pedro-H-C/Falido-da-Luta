@@ -1,8 +1,11 @@
 import math
+import os
 import random
 from collections import namedtuple
 
 import pygame
+
+import audio
 
 DEBUG = False  # F1 no jogo mostra/esconde as hitboxes
 
@@ -157,11 +160,19 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #               "hits" furadas na ida (uma a cada "every" frames), "box" = hitbox (largura, altura).
 #               O personagem segura o frame impact_frame até o objeto voltar.
 # Sem "super", o SUPER usa o golpe forte com brilho dourado.
+# sounds    -> sons do lutador (arquivos em SOUND_DIR): "atk1" (golpe rápido), "atk2" (golpe forte),
+#             "super". Os que faltarem ficam mudos; o volume é nivelado sozinho (audio.LEVELS).
+#             Em vez do nome do arquivo pode ser {"files": ..., "delay": s, "starts": (...)}:
+#             delay = segundos de espera antes de tocar; files com várias partes + starts = em que
+#             segundo cada parte entra (o som acaba junto com a última parte).
+SOUND_DIR = "assets/audio/FightersSounds"
 CHARACTERS = [
     {
         "id": "igor",
         "name": "Igor",
         "sheet_path": "assets/images/Sprites/igor.png",
+        "sounds": {"atk1": "igorAttack1.mp3", "atk2": "igorAttack2.mp3",
+                   "super": "igorSuper.mp3"},
         "data": [250, 1.5, [120, 70]],
         "anim_steps": [4, 6, 5, 6, 5, 4, 5],
         "stats": {"max_health": 110, "speed": 7, "jump_vel": -28, "dmg_mult": 1.15, "stamina": 90},
@@ -180,6 +191,8 @@ CHARACTERS = [
         "id": "macedo",
         "name": "Macedo",
         "sheet_path": "assets/images/Sprites/macedo.png",
+        "sounds": {"atk1": "macedoAttack1.mp3", "atk2": "macedoAttack2.mp3",
+                   "super": "macedoSuper.mp3"},
         "data": [250, 1.5, [120, 70]],
         "anim_steps": [4, 6, 5, 4, 5, 4, 5],
         "stats": {"max_health": 100, "speed": 9, "jump_vel": -31, "dmg_mult": 1.05, "stamina": 120},
@@ -198,6 +211,9 @@ CHARACTERS = [
         "id": "manko",
         "name": "Manko",
         "sheet_path": "assets/images/Sprites/manko.png",
+        "sounds": {"atk1": "mankoAttack1.mp3", "atk2": "mankoAttack2.mp3",
+                   # a parte 2 entra 1 s depois da 1; a 1 acaba junto com a 2
+                   "super": {"files": ["mankoSuperPARTE1.mp3", "mankoSuperPARTE2.mp3"], "starts": (0, 1.0)}},
         "data": [250, 1.5, [120, 70]],
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         "stats": {"max_health": 90, "speed": 6, "jump_vel": -25, "dmg_mult": 1.25, "stamina": 100},
@@ -217,6 +233,8 @@ CHARACTERS = [
         "id": "zuzu",
         "name": "Zuzu",
         "sheet_path": "assets/images/Sprites/zuzu.png",
+        "sounds": {"atk1": "zuzuAttack1.mp3", "atk2": "zuzuAttack2.mp3",
+                   "super": "zuzuSuper.mp3"},
         "data": [500, 0.74, [118, 76]],
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         "stats": {"max_health": 115, "speed": 9, "jump_vel": -31, "dmg_mult": 1.2, "stamina": 100},
@@ -241,6 +259,8 @@ CHARACTERS = [
         "id": "caio",
         "name": "Caio",
         "sheet_path": "assets/images/Sprites/caio.png",
+        "sounds": {"atk1": "caioAttack1.mp3", "atk2": "caioAttack2.mp3",
+                   "super": {"files": "caioSuper.mp3", "delay": 1.0}},
         "data": [500, 0.72, [112, 66]],
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         # rápida e o pulo mais alto do elenco, mas com pouca vida
@@ -371,11 +391,29 @@ def scaled_frame(image, scale, flip=False, ghost=False):
     return _scaled_cache[key]
 
 
+_sound_cache = {}
+
+
+def get_sounds(char_id):
+    """Sons do lutador já carregados e nivelados ({"atk1": Sound, ...}); vazio sem áudio."""
+    if char_id not in _sound_cache:
+        files = CHARACTERS_BY_ID[char_id].get("sounds", {})
+        loaded = {}
+        for name, spec in files.items():
+            spec = spec if isinstance(spec, dict) else {"files": spec}
+            names = [spec["files"]] if isinstance(spec["files"], str) else spec["files"]
+            loaded[name] = audio.load([os.path.join(SOUND_DIR, n) for n in names], audio.LEVELS[name],
+                                      starts=spec.get("starts"), delay=spec.get("delay", 0.0))
+        _sound_cache[char_id] = {name: sound for name, sound in loaded.items() if sound is not None}
+    return _sound_cache[char_id]
+
+
 def preload_characters():
     """Carrega o elenco inteiro. Chamar uma vez, depois de pygame.display.set_mode()."""
     for char in CHARACTERS:
         get_frames(char["id"])
         get_super_fx(char["id"])
+        get_sounds(char["id"])
 
 
 # ---------------- IA DA CPU ----------------
@@ -568,7 +606,8 @@ class Fighter():
         self.tremor = 0                # frames vibrando (sprite treme no lugar)
         self.tremor_amp = 0
         self.tremor_xy = (0, 0)
-        self.signals = []              # avisos para o main: "super_start", "super_impact", "land", "hat_catch"
+        self.signals = []              # avisos para o main: "atk1", "atk2", "super_start", "super_impact",
+        #                                "land", "hat_catch"
         self.tick = 0
         self.prev_held = {}            # teclas do frame anterior (para saber o instante do toque)
         self.last_tap = None           # última direção tocada (dash)
@@ -1081,6 +1120,8 @@ class Fighter():
             self.launch_done = False
             self.super_air = False
             self.signals.append("super_start")
+        else:
+            self.signals.append(f"atk{attack_type}")  # o main toca o som do golpe
         # força a animação a começar do primeiro frame
         self.action = ATTACK_ACTION[attack_type]
         self.frame_index = 0
