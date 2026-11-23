@@ -34,7 +34,9 @@ LEVELS = {
     "atk2": 5450,            # golpe forte: um pouco mais alto
     "super": 7100,           # SUPER: mais alto ainda
     "parry": 5000,
-    "cue": 3600,             # contagem 3, 2, 1 e "LUTE!"
+    "cue": 3600,             # bipes da contagem (quando não há a voz)
+    "voice": 5000,           # locutor: "3", "2", "1"...
+    "voice_fight": 6000,     # ...e o "FIGHT!", mais forte
     "ui": 2600,              # menus
 }
 LOUD_WINDOW = 0.3            # s
@@ -61,10 +63,18 @@ EFFECTS = {
     "resume": (f"{KENNEY}/close_002.ogg", "ui"),             # fechar a pausa
     "connected": (f"{KENNEY}/confirmation_002.ogg", "ui"),   # o outro jogador entrou na sala
     "error": (f"{KENNEY}/error_004.ogg", "ui"),              # aviso de erro (conexão, IP inválido)
-    "count": (f"{KENNEY}/select_005.ogg", "cue"),            # 3, 2, 1
-    "fight": (f"{KENNEY}/confirmation_003.ogg", "cue"),      # LUTE!
+    "count": (f"{KENNEY}/select_005.ogg", "cue"),            # bipe do 3, 2, 1 (sem a voz)
+    "fight": (f"{KENNEY}/confirmation_003.ogg", "cue"),      # bipe do LUTE! (sem a voz)
     "parry": (f"{KENNEY}/glass_001.ogg", "parry"),
 }
+
+# Locutor da contagem: um arquivo só com as 4 falas ("3", "2", "1", "FIGHT!") separadas por um
+# pouco de silêncio. O jogo corta nos silêncios e toca cada fala junto com o número na tela
+# (efeitos "count3", "count2", "count1" e "fight"). Sem o arquivo, ficam os bipes acima.
+COUNTDOWN_VOICE = "assets/audio/GameSounds/3, 2, 1, FIGHT!.mp3"
+COUNTDOWN_NAMES = ("count3", "count2", "count1", "fight")
+SPLIT_SILENCE = 0.05         # abaixo de 5% do pico conta como silêncio entre as falas
+SPLIT_BLOCK = 0.01           # s
 
 # ---------------- TRILHAS ----------------
 # Qualquer música dentro da pasta vale (com mais de uma, cada vez sorteia uma). O volume de cada
@@ -104,6 +114,13 @@ def setup():
         sound = load(path, LEVELS[kind])
         if sound is not None:
             _effects[name] = sound
+    voices = load_split(COUNTDOWN_VOICE, len(COUNTDOWN_NAMES),
+                        [LEVELS["voice"]] * (len(COUNTDOWN_NAMES) - 1) + [LEVELS["voice_fight"]])
+    for name, sound in zip(COUNTDOWN_NAMES, voices or ()):
+        _effects[name] = sound
+    for name in COUNTDOWN_NAMES[:-1]:    # sem a voz: o bipe em cada número
+        if name not in _effects and "count" in _effects:
+            _effects[name] = _effects["count"]
     for group, folder in MUSIC_DIRS.items():
         names = sorted(os.listdir(folder)) if os.path.isdir(folder) else []
         _tracks[group] = [os.path.join(folder, n) for n in names if n.lower().endswith(MUSIC_EXTS)]
@@ -135,12 +152,7 @@ def load(paths, level, starts=None, delay=0.0):
     parts = [_trim(array("h", sound.get_raw()), rate, channels) for sound in sounds]
     lead = array("h", bytes(2 * round(delay * rate) * channels))
     if len(parts) == 1:
-        gain = _gain(parts[0], rate, channels, level)
-        if gain <= 1:            # só abaixar: o próprio volume do Sound resolve
-            sound = pygame.mixer.Sound(buffer=(lead + parts[0]).tobytes())
-            sound.set_volume(gain)
-            return sound
-        return pygame.mixer.Sound(buffer=(lead + _scale(parts[0], gain)).tobytes())
+        return _leveled(lead + parts[0], rate, channels, level)
 
     # partes: cada uma nivelada no trecho que realmente toca, depois o som inteiro nivelado de novo
     # (onde as partes se encontram elas somam e ficariam mais altas que o resto)
@@ -160,12 +172,58 @@ def load(paths, level, starts=None, delay=0.0):
     return pygame.mixer.Sound(buffer=(lead + out).tobytes())
 
 
-def _trim(samples, rate, channels):
-    """Tira o silêncio do começo (deixando LEAD_IN de folga)."""
+def _leveled(samples, rate, channels, level):
+    """Sound com as amostras na altura level."""
+    gain = _gain(samples, rate, channels, level)
+    if gain <= 1:                # só abaixar: o próprio volume do Sound resolve
+        sound = pygame.mixer.Sound(buffer=samples.tobytes())
+        sound.set_volume(gain)
+        return sound
+    return pygame.mixer.Sound(buffer=_scale(samples, gain).tobytes())
+
+
+def load_split(path, count, levels):
+    """Corta um arquivo com `count` falas separadas por silêncio (nos count-1 silêncios mais
+    longos) e devolve uma lista de Sounds, cada fala na sua altura (levels[i]).
+    None sem áudio, sem o arquivo ou se não achar silêncios suficientes."""
+    if not available() or not os.path.exists(path):
+        return None
+    try:
+        raw = array("h", pygame.mixer.Sound(path).get_raw())
+    except pygame.error:
+        return None
+    rate, size, channels = pygame.mixer.get_init()
+    if size != -16:
+        return None
+    peak = _peak(raw)
+    step = round(SPLIT_BLOCK * rate) * channels
+    quiet = [_peak(raw[i:i + step]) < peak * SPLIT_SILENCE for i in range(0, len(raw), step)]
+    loud = [i for i, q in enumerate(quiet) if not q]
+    if not loud:
+        return None
+    gaps = []                    # (tamanho, começo, fim) de cada silêncio entre a 1ª e a última fala
+    start = None
+    for i in range(loud[0], loud[-1] + 1):
+        if quiet[i] and start is None:
+            start = i
+        elif not quiet[i] and start is not None:
+            gaps.append((i - start, start, i))
+            start = None
+    if len(gaps) < count - 1:
+        return None
+    cuts = sorted((a + b) // 2 * step for _, a, b in sorted(gaps, reverse=True)[:count - 1])
+    bounds = [0] + cuts + [len(raw)]
+    # cada fala começa onde ela fica forte (o eco da fala anterior não atrasa a próxima)
+    return [_leveled(_trim(raw[a:b], rate, channels, SPLIT_SILENCE * 2), rate, channels, level)
+            for a, b, level in zip(bounds, bounds[1:], levels)]
+
+
+def _trim(samples, rate, channels, silence=SILENCE):
+    """Tira o silêncio do começo (deixando LEAD_IN de folga); abaixo de `silence` do pico é silêncio."""
     peak = _peak(samples)
     if not peak:
         return samples
-    start = next(i for i, v in enumerate(samples) if abs(v) > peak * SILENCE)
+    start = next(i for i, v in enumerate(samples) if abs(v) > peak * silence)
     start = max(0, start - int(LEAD_IN * rate) * channels)
     start -= start % channels
     return samples[start:]

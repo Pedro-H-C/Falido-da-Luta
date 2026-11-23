@@ -1177,7 +1177,7 @@ class Match:
         for f, meter in zip(self.fighters, self.super_carry):
             f.super_meter = meter
         self.intro_count = 3
-        audio.play("count")
+        audio.play(f"count{self.intro_count}")   # locutor: "3"
         self.last_count_update = self.clock_ms()
         self.fight_banner_until = 0
         self.round_over = False
@@ -1222,7 +1222,7 @@ class Match:
         if self.intro_count > 0 and now - self.last_count_update >= 1000:
             self.last_count_update = now
             self.intro_count -= 1
-            audio.play("count" if self.intro_count else "fight")
+            audio.play(f"count{self.intro_count}" if self.intro_count else "fight")
             if self.intro_count == 0:
                 self.fight_banner_until = now + FIGHT_BANNER_MS
 
