@@ -96,6 +96,8 @@ SONIC_RING_SPAN = 0.95       # meia abertura do arco da onda (radianos)
 SONIC_AFTER = 70             # frames que o efeito ainda dura depois da última onda
 SONIC_MAGENTA = (255, 70, 200)   # franjas da onda (separação de cores)
 SONIC_CYAN = (70, 230, 255)
+BEAM_GROW = 5                # frames para o laser dos olhos chegar até a ponta
+BEAM_PULSE = 0.12            # quanto a espessura do laser pulsa
 QUAKE_MAX = 14               # px do tremor da tela INTEIRA (com o HUD) no máximo
 QUAKE_CHARGE = 0.55          # até onde o tremor sobe enquanto o SUPER carrega
 QUAKE_DECAY = 0.965
@@ -598,6 +600,7 @@ class Effects:
         self.debris = []        # pedrinhas do chão e poeira do teto
         self.glints = []        # brilho dos óculos
         self.sonic = None       # rajada sônica em andamento
+        self.beam = None        # laser dos olhos em andamento
         self.combo = 0          # acertos seguidos do SUPER (rajada, furadas do chapéu)
         self.cutin = None       # faixa cinematográfica do SUPER
         self.hitstop = 0        # frames com o jogo congelado
@@ -753,6 +756,9 @@ class Effects:
         if fighter.sonic:
             self.start_sonic(fighter, target)
             return
+        if fighter.beam:
+            self.start_beam(fighter, target)
+            return
         if fighter.hat is not None:
             self.start_hat(fighter)
             return
@@ -820,6 +826,79 @@ class Effects:
             self.focus = (x, y)
         self._shake(10, 30)
         self.spawn_rocks(fighter.rect.centerx, 46)
+
+    def start_beam(self, fighter, target):
+        """Laser dos olhos: clarão nos olhos e o raio crescendo até o oponente (ver _draw_beam)."""
+        frames = get_super_fx(fighter.character["id"])
+        height = fighter.beam["height"]
+        image = pygame.transform.smoothscale(
+            frames[0], (round(frames[0].get_width() * height / frames[0].get_height()), height))
+        self.beam = {"fighter": fighter, "target": target, "image": image, "age": 0, "end": None}
+        x, y = self.beam_origin(fighter)
+        color = fighter.super_color
+        self.impacts.append(Impact(x, y, 110, WHITE, star=False, life=14))
+        self.impacts.append(Impact(x, y, 70, color, star=False, life=12))
+        self._burst(x, y, -1 if fighter.flip else 1, self.palette(color), 22, (5, 14), 0.5)
+        self.flash = max(self.flash, 90)
+        self.zoom = max(self.zoom, 0.06)
+        self.chroma = max(self.chroma, 6.0)
+        self._shake(8, 24)
+
+    @staticmethod
+    def beam_origin(fighter):
+        """De onde o raio sai agora (olhos no frame atual do SUPER); None fora desses frames."""
+        eyes = fighter.beam["eyes"]
+        if fighter.action != 7 or fighter.frame_index not in eyes:
+            return None
+        return fighter.super_point(*eyes[fighter.frame_index])
+
+    def _update_beam(self):
+        beam = self.beam
+        if beam is None:
+            return
+        fighter = beam["fighter"]
+        start = self.beam_origin(fighter)
+        if start is None:  # acabaram os frames do disparo (ou levou golpe)
+            self.beam = None
+            return
+        beam["age"] += 1
+        # o raio vai até o alcance do golpe (ou a borda da tela) e para no corpo do oponente
+        direction = -1 if fighter.flip else 1
+        reach = fighter.rect.centerx + direction * fighter.attack_reach(SUPER)
+        end = max(0, min(SCREEN_WIDTH, reach))
+        target = beam["target"]
+        if target is not None and target.alive and target.rect.top < start[1] < target.rect.bottom:
+            body = target.rect.centerx - direction * target.rect.width // 4
+            if (body - start[0]) * direction > 0 and (end - body) * direction > 0:
+                end = body
+        grow = min(1.0, beam["age"] / BEAM_GROW)
+        beam["end"] = start[0] + (end - start[0]) * grow
+        if grow >= 1 and beam["age"] % 3 == 0:  # faíscas na ponta
+            self._burst(beam["end"], start[1], -direction, self.palette(fighter.super_color), 5, (3, 9), 1.2)
+
+    def _draw_beam(self, ox, oy):
+        beam = self.beam
+        if beam is None or beam["end"] is None:
+            return
+        start = self.beam_origin(beam["fighter"])
+        if start is None:
+            return
+        x0, y = start
+        length = round(abs(beam["end"] - x0))
+        if length < 4:
+            return
+        pulse = 1 + BEAM_PULSE * math.sin(beam["age"] * 1.3)
+        height = max(4, round(beam["image"].get_height() * pulse))
+        image = pygame.transform.scale(beam["image"], (length, height))
+        if beam["end"] < x0:
+            image = pygame.transform.flip(image, True, False)
+        left = min(x0, beam["end"])
+        screen.blit(image, (round(left) + ox, round(y - height / 2) + oy))
+        glow = round(16 * pulse)  # brilho nos olhos (somado à imagem, sem tampar o rosto)
+        spot = pygame.Surface((glow * 2, glow * 2), pygame.SRCALPHA)
+        pygame.draw.circle(spot, (*beam["fighter"].super_color, 110), (glow, glow), glow)
+        pygame.draw.circle(spot, (255, 255, 255, 170), (glow, glow), glow // 2)
+        screen.blit(spot, (round(x0) - glow + ox, round(y) - glow + oy), special_flags=pygame.BLEND_RGBA_ADD)
 
     def start_hat(self, fighter):
         """Arremesso do chapéu: estouro de energia saindo da mão."""
@@ -909,6 +988,7 @@ class Effects:
         else:
             self.dim = max(0, self.dim - 10)
         self._update_sonic()
+        self._update_beam()
         self._update_camera()
         self._update_cutin()
 
@@ -994,6 +1074,7 @@ class Effects:
             color = tuple(int(c * (0.4 + 0.6 * fade)) for c in d.color) if d.floor is None else d.color
             pygame.draw.circle(screen, color, (d.x + ox, d.y + oy), d.size)
         self._draw_sonic(ox, oy)
+        self._draw_beam(ox, oy)
         for impact in self.impacts:
             t = 1 - impact.life / impact.max_life  # 0 -> 1
             cx, cy = impact.x + ox, impact.y + oy

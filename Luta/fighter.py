@@ -159,6 +159,10 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #               "catch" = onde fica no frame seguinte (volta para lá). "reach" = distância máxima,
 #               "hits" furadas na ida (uma a cada "every" frames), "box" = hitbox (largura, altura).
 #               O personagem segura o frame impact_frame até o objeto voltar.
+#   beam     -> raio (laser dos olhos): a imagem "sheet_path" (um frame "size", ponta para a direita)
+#               é esticada dos olhos até o oponente ou o alcance. "eyes" = {frame do SUPER: pixel
+#               de onde o raio sai}; o raio aparece só nesses frames. "height" = espessura na tela.
+#               Acerta como a rajada sônica: "hits" acertos, um a cada "every" frames.
 # Sem "super", o SUPER usa o golpe forte com brilho dourado.
 # sounds    -> sons do lutador (arquivos em SOUND_DIR): "atk1" (golpe rápido), "atk2" (golpe forte),
 #             "super". Os que faltarem ficam mudos; o volume é nivelado sozinho (audio.LEVELS).
@@ -295,6 +299,35 @@ CHARACTERS = [
                           "box": (80, 46)},
         },
     },
+    {
+        "id": "antonio",
+        "name": "Antonio",
+        "sheet_path": "assets/images/Sprites/antonio.png",
+        "sounds": {},             # ainda sem sons (atk1, atk2, super)
+        "data": [250, 1.5, [120, 70]],
+        "height": 1.0,
+        "anim_steps": [4, 4, 5, 4, 4, 4, 5],
+        "stats": {"max_health": 100, "speed": 8, "jump_vel": -29, "dmg_mult": 1.1, "stamina": 100},
+        "tagline": "Tyler durden",
+        "super": {
+            # montado com: python tools/montar_super.py antonio
+            # (raw/antonio_super_fx_raw.png teve o miolo branco do raio preenchido: o fundo
+            # também era branco e o remover_fundo tinha deixado ele transparente)
+            "sheet_path": "assets/images/Sprites/antonio_super.png",
+            "rect": (65, -5, 370, 370),
+            # olhos acendem, energia sobe, dispara, joga a cabeça para trás, volta
+            "frame_ms": (110, 150, 260, 300, 220),
+            "impact_frame": 2,
+            "range": 5.5,
+            "damage": 30,
+            "color": (235, 40, 50),
+            "freeze": 56,
+            "name": "RAIO LAZER",
+            "cutin": {"frame": 1, "box": (105, 30, 130, 125)},
+            "beam": {"sheet_path": "assets/images/Sprites/antonio_super_fx.png", "size": (1662, 362),
+                     "eyes": {2: (215, 103), 3: (118, 100)}, "height": 110, "hits": 6, "every": 5},
+        },
+    },
 ]
 CHARACTERS_BY_ID = {char["id"]: char for char in CHARACTERS}
 
@@ -373,7 +406,7 @@ def get_super_fx(char_id):
     """Frames do efeito do SUPER (onda do Igor, chapéu do Caio), olhando para a direita, ou None."""
     if char_id not in _fx_cache:
         sup = CHARACTERS_BY_ID[char_id].get("super", {})
-        fx = sup.get("fx") or sup.get("boomerang")
+        fx = sup.get("fx") or sup.get("boomerang") or sup.get("beam")
         _fx_cache[char_id] = _strip(fx["sheet_path"], *fx["size"]) if fx else None
     return _fx_cache[char_id]
 
@@ -569,6 +602,8 @@ class Fighter():
         self.launch = (self.super_data or {}).get("launch")
         self.sonic = (self.super_data or {}).get("sonic")
         self.boomerang = (self.super_data or {}).get("boomerang")
+        self.beam = (self.super_data or {}).get("beam")
+        self.rapid = self.sonic or self.beam   # SUPER de vários acertos seguidos
         stats = character["stats"]
         self.max_health = stats["max_health"]
         self.speed = stats["speed"]
@@ -822,9 +857,9 @@ class Fighter():
                 self.attack_hit_done = True
                 if self.attack_type == SUPER:
                     self.signals.append("super_impact")
-                    if self.sonic:  # começa a rajada: este é o 1º acerto, os outros vêm depois
-                        self.multi_left = self.sonic["hits"] - 1
-                        self.multi_clock = self.sonic["every"]
+                    if self.rapid:  # começa a rajada: este é o 1º acerto, os outros vêm depois
+                        self.multi_left = self.rapid["hits"] - 1
+                        self.multi_clock = self.rapid["every"]
                         self.tremor, self.tremor_amp = TREMOR_SELF, TREMOR_SELF_AMP
                 if self.attack_type == SUPER and self.boomerang:
                     self.hat = self._new_hat()  # o chapéu sai da mão; quem acerta é ele
@@ -843,7 +878,7 @@ class Fighter():
                 self.multi_clock -= 1
                 if self.multi_clock <= 0:
                     self.multi_left -= 1
-                    self.multi_clock = self.sonic["every"]
+                    self.multi_clock = self.rapid["every"]
                     hit_event = self.resolve_attack(target) or hit_event
 
         # FÍSICA (sempre roda, mesmo sem controle)
@@ -1195,13 +1230,13 @@ class Fighter():
         base = self.super_damage if self.attack_type == SUPER else atk["damage"]
         knockback = atk["knockback"]
         kind = "hit"
-        sonic = self.attack_type == SUPER and self.sonic
+        sonic = self.attack_type == SUPER and self.rapid
         if sonic:
             tick = round(base * SONIC_TICK_SHARE)
             if self.multi_left > 0:  # acerto do meio da rajada: pouco dano, segura o oponente
                 base, knockback, kind = tick, SONIC_TICK_PUSH, "multi"
             else:                    # último acerto: o resto do dano e arremessa
-                base -= tick * (self.sonic["hits"] - 1)
+                base -= tick * (self.rapid["hits"] - 1)
             target.tremor, target.tremor_amp = TREMOR_HIT, TREMOR_HIT_AMP
         if self.super_air:
             base -= self.launch["damage"]  # parte do dano já saiu no lançamento
