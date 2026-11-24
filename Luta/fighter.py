@@ -165,7 +165,10 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #             Em vez do nome do arquivo pode ser {"files": ..., "delay": s, "starts": (...)}:
 #             delay = segundos de espera antes de tocar; files com várias partes + starts = em que
 #             segundo cada parte entra (o som acaba junto com a última parte).
+# height    -> tamanho na tela em relação à sprite (1.0 = como está na sheet). O pé continua no chão
+#             e a hitbox não muda: é só o desenho (para as alturas ficarem proporcionais).
 SOUND_DIR = "assets/audio/FightersSounds"
+FEET_Y = 290        # onde fica o pé de todos os lutadores, em pixels abaixo do topo da hitbox
 CHARACTERS = [
     {
         "id": "igor",
@@ -174,6 +177,7 @@ CHARACTERS = [
         "sounds": {"atk1": "igorAttack1.mp3", "atk2": "igorAttack2.mp3",
                    "super": "igorSuper.mp3"},
         "data": [250, 1.5, [120, 70]],
+        "height": 1.038,
         "anim_steps": [4, 6, 5, 6, 5, 4, 5],
         "stats": {"max_health": 110, "speed": 7, "jump_vel": -28, "dmg_mult": 1.15, "stamina": 90},
         "tagline": "Gordo e preguento",
@@ -194,6 +198,7 @@ CHARACTERS = [
         "sounds": {"atk1": "macedoAttack1.mp3", "atk2": "macedoAttack2.mp3",
                    "super": "macedoSuper.mp3"},
         "data": [250, 1.5, [120, 70]],
+        "height": 1.006,
         "anim_steps": [4, 6, 5, 4, 5, 4, 5],
         "stats": {"max_health": 100, "speed": 9, "jump_vel": -31, "dmg_mult": 1.05, "stamina": 120},
         "tagline": "Forte e ágil",
@@ -215,6 +220,7 @@ CHARACTERS = [
                    # a parte 2 entra 1 s depois da 1; a 1 acaba junto com a 2
                    "super": {"files": ["mankoSuperPARTE1.mp3", "mankoSuperPARTE2.mp3"], "starts": (0, 1.0)}},
         "data": [250, 1.5, [120, 70]],
+        "height": 0.972,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         "stats": {"max_health": 90, "speed": 6, "jump_vel": -25, "dmg_mult": 1.25, "stamina": 100},
         "tagline": "Muito forte, mas lento",
@@ -236,6 +242,7 @@ CHARACTERS = [
         "sounds": {"atk1": "zuzuAttack1.mp3", "atk2": "zuzuAttack2.mp3",
                    "super": "zuzuSuper.mp3"},
         "data": [500, 0.74, [118, 76]],
+        "height": 0.988,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         "stats": {"max_health": 115, "speed": 9, "jump_vel": -31, "dmg_mult": 1.2, "stamina": 100},
         "tagline": "O mais poderoso de todos",
@@ -262,6 +269,7 @@ CHARACTERS = [
         "sounds": {"atk1": "caioAttack1.mp3", "atk2": "caioAttack2.mp3",
                    "super": {"files": "caioSuper.mp3", "delay": 1.0}},
         "data": [500, 0.72, [112, 66]],
+        "height": 1.0,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         # rápida e o pulo mais alto do elenco, mas com pouca vida
         "stats": {"max_health": 95, "speed": 9, "jump_vel": -32, "dmg_mult": 1.1, "stamina": 110},
@@ -371,6 +379,18 @@ def get_super_fx(char_id):
 
 
 _scaled_cache = {}
+_sized_cache = {}
+
+
+def sized_frame(image, factor):
+    """Frame do cache no tamanho `factor` (height do personagem), guardado para reuso."""
+    if factor == 1.0:
+        return image
+    key = (id(image), factor)
+    if key not in _sized_cache:
+        size = (max(1, round(image.get_width() * factor)), max(1, round(image.get_height() * factor)))
+        _sized_cache[key] = pygame.transform.smoothscale(image, size)
+    return _sized_cache[key]
 
 
 def scaled_frame(image, scale, flip=False, ghost=False):
@@ -541,6 +561,7 @@ class Fighter():
         self.controls = CONTROLS[player]
         self.offset = character["data"][2]
         self.frame_size = int(character["data"][0] * character["data"][1])
+        self.height_factor = character.get("height", 1.0)
         self.super_data = character.get("super")
         self.super_range = (self.super_data or {}).get("range", ATTACKS[SUPER]["range"])
         self.super_color = (self.super_data or {}).get("color", SUPER_COLOR_DEFAULT)
@@ -680,7 +701,14 @@ class Fighter():
         left, top, _, _ = self.super_data["rect"]
         x0 = self.rect.x - self.offset[0]
         x = x0 + self.frame_size - left - px if self.flip else x0 + left + px
-        return x, self.rect.y - self.offset[1] + top + py
+        return self.grow(self.rect.x, self.rect.y, x, self.rect.y - self.offset[1] + top + py)
+
+    def grow(self, rect_x, rect_y, x, y):
+        """Ponto (x, y) do desenho no tamanho do personagem: afasta do pé, que fica parado."""
+        k = self.height_factor
+        ax = rect_x - self.offset[0] + self.frame_size // 2
+        ay = rect_y + FEET_Y
+        return ax + (x - ax) * k, ay + (y - ay) * k
 
     def threat(self, target):
         """Golpe deste lutador que vai encostar em target: (chave, frames até encostar) ou None.
@@ -1464,12 +1492,13 @@ class Fighter():
 
         # rastro azul do dash
         for gx, gy, image, flip, life in self.ghosts:
-            ghost = pygame.transform.flip(image, flip, False)
+            ghost = pygame.transform.flip(sized_frame(image, self.height_factor), flip, False)
             ghost.fill((40, 90, 200), special_flags=pygame.BLEND_RGB_ADD)
             ghost.set_alpha(int(110 * life / 10))
-            surface.blit(ghost, (gx - self.offset[0] + ox, gy - self.offset[1] + oy))
+            x, y = self.grow(gx, gy, gx - self.offset[0], gy - self.offset[1])
+            surface.blit(ghost, (round(x) + ox, round(y) + oy))
 
-        img = pygame.transform.flip(self.image, self.flip, False)  # cópia: o cache fica intacto
+        img = pygame.transform.flip(sized_frame(self.image, self.height_factor), self.flip, False)  # cópia
         if self.flash_timer > 0:
             img.fill((150, 150, 150), special_flags=pygame.BLEND_RGB_ADD)    # clarão branco
         elif self.parry_flash > 0:
@@ -1480,19 +1509,21 @@ class Fighter():
             glow = int(45 + 35 * math.sin(pygame.time.get_ticks() / 60))
             img.fill((glow, int(glow * 0.75), 0), special_flags=pygame.BLEND_RGB_ADD)
 
-        x = self.rect.x - self.offset[0] + ox
-        y = self.rect.y - self.offset[1] + oy
+        x = self.rect.x - self.offset[0]
+        y = self.rect.y - self.offset[1]
         if self.action == 7 and self.super_data:
             # frame do SUPER é maior que o normal; rect diz onde ele fica em relação ao frame normal
             left, top, width, _ = self.super_data["rect"]
             x += self.frame_size - left - width if self.flip else left
             y += top
-        surface.blit(img, (x, y))
+        x, y = self.grow(self.rect.x, self.rect.y, x, y)   # canto do desenho, no tamanho do personagem
+        surface.blit(img, (round(x) + ox, round(y) + oy))
 
         # estrelinhas de tonto
         if self.stun_timer > 0 and self.alive:
             t = pygame.time.get_ticks() / 160
-            cx, cy = self.rect.centerx + ox, self.rect.y - 34 + oy
+            _, head = self.grow(self.rect.x, self.rect.y, 0, self.rect.y - 34)
+            cx, cy = self.rect.centerx + ox, head + oy
             for i in range(3):
                 angle = t + i * 2 * math.pi / 3
                 point = (cx + math.cos(angle) * 34, cy + math.sin(angle) * 9)

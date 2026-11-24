@@ -30,3 +30,5 @@ CRÉDITOS
   Licença Creative Commons: By Attribution 4.0 (creativecommons.org/licenses/by/4.0/)
   "Curse of the Scarab" (luta) e a música do menu.
 - Sons de interface: Kenney (www.kenney.nl), licença CC0.
+- Locutor "3, 2, 1, FIGHT!": "Three Two One Fight (Deep Voice)", freesound_community,
+  via Pixabay (pixabay.com), licença Pixabay.
