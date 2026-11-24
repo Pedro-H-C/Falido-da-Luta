@@ -1,6 +1,6 @@
 # Falido da Luta
 
-Jogo de luta 2D feito em Python com [pygame](https://www.pygame.org/): 5 lutadores, golpe rápido,
+Jogo de luta 2D feito em Python com [pygame](https://www.pygame.org/): 6 lutadores, golpe rápido,
 golpe forte, SUPER de cada personagem, parry, dash, modo contra a CPU (3 dificuldades),
 dois jogadores no mesmo PC e modo online (direto pelo Radmin VPN / mesmo Wi-Fi; guia em
 [Luta/online/COMO_JOGAR_ONLINE.md](Luta/online/COMO_JOGAR_ONLINE.md)).
@@ -22,7 +22,7 @@ Não precisa instalar Python nem nada.
 | SUPER | Y | Vírgula |
 
 Toque para trás na hora do golpe: **parry**. Dois toques numa direção: **dash**.
-Esc: pausa. F11: tela cheia.
+Esc: pausa. F11: tela cheia. Volume da música e dos efeitos: Configurações (no menu ou na pausa).
 
 ## Rodar pelo código
 

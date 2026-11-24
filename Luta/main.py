@@ -59,6 +59,16 @@ ONLINE_FORM = "ONLINE_FORM"      # digitando IP ou código da sala
 ONLINE_WAIT = "ONLINE_WAIT"      # esperando o outro jogador / conectando
 ONLINE_SELECT = "ONLINE_SELECT"  # seleção de lutadores com o outro jogador
 ONLINE_ERROR = "ONLINE_ERROR"    # aviso (conexão caiu, versão diferente...)
+SETTINGS = "SETTINGS"            # configurações (som, tela cheia); abre do menu ou da pausa
+
+# CONFIGURAÇÕES: linhas de volume (tipo no audio, nome na tela, chave no arquivo de configuração)
+VOLUME_ROWS = (("master", "Volume geral", "volume_geral"),
+               ("music", "Música", "volume_musica"),
+               ("effects", "Efeitos", "volume_efeitos"))
+VOLUME_STEPS = 10               # cada toque muda 10%
+SETTINGS_Y = 215                # primeira linha
+SETTINGS_SPACING = 72
+VOLUME_BAR = pygame.Rect(470, 0, 300, 26)   # x e tamanho da barra (y vem da linha)
 
 # MODOS
 MODE_CPU = "cpu"
@@ -272,9 +282,10 @@ def render_text(text, font, color):
         elif kind == "circumflex":
             pygame.draw.lines(out, color, False,
                               [(cx - mark_w * 0.6, y1), (cx, y0), (cx + mark_w * 0.6, y1)], stroke)
-        elif kind == "tilde":
-            pygame.draw.lines(out, color, False, [(cx - mark_w * 0.7, y1), (cx - mark_w * 0.3, y0),
-                                                  (cx + mark_w * 0.3, y1), (cx + mark_w * 0.7, y0)], stroke)
+        elif kind == "tilde":  # onda larga e baixa (em zigue-zague parecia um "N" nas letras grandes)
+            mid, amp, half = (y0 + y1) / 2, mark_h * 0.32, mark_w * 0.85
+            wave = [(cx - half + 2 * half * t / 12, mid - amp * math.sin(2 * math.pi * t / 12)) for t in range(13)]
+            pygame.draw.lines(out, color, False, wave, stroke)
         else:  # cedilha, embaixo da letra
             y = bottom + pad_top
             pygame.draw.lines(out, color, False, [(cx, y), (cx + mark_w * 0.4, y + mark_h * 0.5),
@@ -1953,18 +1964,25 @@ class Game:
         self.message = ("", "")      # (título, texto) da tela de aviso
         self.note = None             # aviso rápido na seleção online (ex.: luta dessincronizada)
         self.wait_started = 0
+        self.settings_back = MAIN_MENU   # para onde as Configurações voltam (menu ou pausa)
+        for kind, _, key in VOLUME_ROWS:
+            value = self.config.get(key, 1.0)
+            if isinstance(value, (int, float)):
+                audio.set_volume(kind, value)
         audio.music("menu")
 
     def set_state(self, state):
         # sons da luta (o do SUPER dura segundos): param com a pausa e acabam ao sair da luta
-        if state == PAUSE:
+        # (as Configurações abertas da pausa contam como pausa)
+        paused = state == PAUSE or (state == SETTINGS and self.settings_back == PAUSE)
+        if paused:
             audio.pause_fighters()
         elif state == FIGHT and self.state == PAUSE:
             audio.resume_fighters()
         elif state != MATCH_OVER:
             audio.stop_fighters()
-        audio.music("fight" if state in (FIGHT, PAUSE, MATCH_OVER) else "menu")
-        audio.duck_music(state == PAUSE)
+        audio.music("fight" if paused or state in (FIGHT, MATCH_OVER) else "menu")
+        audio.duck_music(paused)
         self.state = state
         self.selected = 0
         self.option_rects = []
@@ -1975,7 +1993,9 @@ class Game:
 
     def menu_options(self):
         if self.state == MAIN_MENU:
-            return ["1P vs CPU", "1P vs 2P", "Online", fullscreen_label(), "Sair"]
+            return ["1P vs CPU", "1P vs 2P", "Online", "Configurações", "Sair"]
+        if self.state == SETTINGS:
+            return [label for _, label, _ in VOLUME_ROWS] + [fullscreen_label(), "Voltar"]
         if self.state == ONLINE_MENU:
             server = ["Criar sala", "Entrar com código"] if ONLINE_SERVER else []
             return server + ["Criar sala direta", "Entrar pelo IP", "Voltar"]
@@ -1984,7 +2004,7 @@ class Game:
         if self.state == FIGHT:  # só com o menu do online aberto
             return ["Continuar", "Sair da sala"]
         if self.state == PAUSE:
-            return ["Continuar", "Trocar lutadores", fullscreen_label(), "Menu principal"]
+            return ["Continuar", "Trocar lutadores", "Configurações", "Menu principal"]
         if self.online:
             return ["Revanche", "Sair da sala"]
         return ["Revanche", "Trocar lutadores", "Menu principal"]
@@ -1999,6 +2019,73 @@ class Game:
         p1_id, p2_id = (CHARACTERS[i]["id"] for i in self.picks)
         self.match = Match(self.mode, p1_id, p2_id, self.difficulty)
         self.set_state(FIGHT)
+
+    def open_settings(self):
+        self.settings_back = self.state
+        self.set_state(SETTINGS)
+
+    def close_settings(self, sound=True):
+        if sound:
+            audio.play("back")
+        back = self.settings_back
+        self.settings_back = MAIN_MENU
+        self.set_state(back)
+        self.selected = 2 if back == PAUSE else 3   # volta com "Configurações" destacado
+
+    def change_volume(self, row, value):
+        kind, _, key = VOLUME_ROWS[row]
+        value = max(0, min(VOLUME_STEPS, round(value))) / VOLUME_STEPS
+        if value == audio.get_volume(kind):
+            return
+        audio.set_volume(kind, value)
+        self.config[key] = value
+        save_config(self.config)
+        audio.play("hover")   # dá para ouvir como ficou
+
+    def volume_row_at(self, pos):
+        """Linha de volume cuja barra (com folga) está em pos, ou None."""
+        for row in range(len(VOLUME_ROWS)):
+            if self.volume_bar(row).inflate(16, 24).collidepoint(pos):
+                return row
+        return None
+
+    @staticmethod
+    def volume_bar(row):
+        return VOLUME_BAR.move(0, SETTINGS_Y + row * SETTINGS_SPACING - VOLUME_BAR.height // 2)
+
+    def handle_settings(self, event):
+        """Setas/A-D mudam o volume da linha; clique ou roda do mouse na barra também."""
+        options = self.menu_options()
+        row = self.selected if self.selected < len(VOLUME_ROWS) else None
+        if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
+            self.close_settings()
+            return
+        if event.type == pygame.KEYDOWN and row is not None and event.key in (
+                pygame.K_LEFT, pygame.K_a, pygame.K_RIGHT, pygame.K_d):
+            step = 1 if event.key in (pygame.K_RIGHT, pygame.K_d) else -1
+            kind = VOLUME_ROWS[row][0]
+            self.change_volume(row, audio.get_volume(kind) * VOLUME_STEPS + step)
+            return
+        if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION):
+            bar_row = self.volume_row_at(event.pos)
+            dragging = event.type == pygame.MOUSEMOTION and event.buttons[0]
+            clicked = event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+            if bar_row is not None and (clicked or dragging):
+                self.selected = bar_row
+                bar = self.volume_bar(bar_row)
+                self.change_volume(bar_row, (event.pos[0] - bar.x) / bar.width * VOLUME_STEPS)
+                return
+            if bar_row is not None and event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
+                kind = VOLUME_ROWS[bar_row][0]   # roda do mouse
+                self.change_volume(bar_row, audio.get_volume(kind) * VOLUME_STEPS + (1 if event.button == 4 else -1))
+                return
+        self.selected, choice = handle_menu_event(event, options, self.option_rects, self.selected)
+        if choice is None:
+            return
+        if choice.startswith("Tela cheia"):
+            toggle_fullscreen()
+        elif choice == "Voltar":   # o som de voltar já tocou
+            self.close_settings(sound=False)
 
     def pause_game(self):
         self.set_state(PAUSE)
@@ -2151,6 +2238,8 @@ class Game:
                 self.pause_game()
             elif event.type == pygame.WINDOWFOCUSLOST:
                 self.pause_game()
+        elif self.state == SETTINGS:
+            self.handle_settings(event)
         elif self.state == PAUSE and self.is_pause_toggle(event):
             audio.play("resume")
             self.resume_game()
@@ -2169,6 +2258,8 @@ class Game:
             self.open_char_select(MODE_VERSUS)
         elif escolha == "Online":
             self.set_state(ONLINE_MENU)
+        elif escolha == "Configurações":
+            self.open_settings()
         elif escolha == "Criar sala":
             self.create_room()
         elif escolha == "Entrar com código":
@@ -2270,6 +2361,8 @@ class Game:
             self.form.draw()
         elif self.state == ONLINE_WAIT:
             self.draw_waiting()
+        elif self.state == SETTINGS:
+            self.draw_settings()
         else:
             self.match.draw()
             if self.state == FIGHT:
@@ -2302,6 +2395,44 @@ class Game:
             for i, line in enumerate(wrap_text(text, score_font, 820)):
                 draw_text(line, score_font, WHITE, SCREEN_WIDTH // 2, 240 + i * 40, "center", shadow=True)
             self.option_rects = draw_options(self.menu_options(), self.selected, 470)
+
+    def draw_settings(self):
+        if self.settings_back == PAUSE:   # aberto da pausa: a luta parada aparece atrás
+            self.match.draw()
+            screen.blit(pause_overlay, (0, 0))
+        else:
+            screen.fill(BLACK)
+            screen.blit(menu_image, (0, 0))
+        draw_text("Configurações", title_font, YELLOW, SCREEN_WIDTH // 2, 105, "center", shadow=True)
+        options = self.menu_options()
+        self.option_rects = []
+        for i, label in enumerate(options):
+            y = SETTINGS_Y + i * SETTINGS_SPACING
+            selected = i == self.selected
+            color = YELLOW if selected else WHITE
+            if i >= len(VOLUME_ROWS):   # tela cheia e voltar: como as outras opções de menu
+                text = ("> " + label + " <") if selected else label
+                self.option_rects.append(draw_text(text, menu_font, color, SCREEN_WIDTH // 2, y + 10,
+                                                   "center", shadow=True))
+                continue
+            label_rect = draw_text(label, menu_font, color, VOLUME_BAR.x - 30, y, "midright", shadow=True)
+            bar = self.volume_bar(i)
+            value = audio.get_volume(VOLUME_ROWS[i][0])
+            pygame.draw.rect(screen, BLACK, bar.inflate(6, 6), border_radius=8)
+            pygame.draw.rect(screen, DARK_GRAY, bar, border_radius=6)
+            gap = 4
+            width = (bar.width - gap * (VOLUME_STEPS + 1)) / VOLUME_STEPS
+            for step in range(round(value * VOLUME_STEPS)):   # um bloco a cada 10%
+                block = pygame.Rect(round(bar.x + gap + step * (width + gap)), bar.y + gap,
+                                    round(width), bar.height - 2 * gap)
+                pygame.draw.rect(screen, color, block, border_radius=3)
+            if selected:
+                pygame.draw.rect(screen, YELLOW, bar.inflate(6, 6), 2, border_radius=8)
+            percent = f"{round(value * 100)}%" if value else "Mudo"
+            draw_text(percent, score_font, color, bar.right + 22, y, "midleft", shadow=True)
+            self.option_rects.append(label_rect.union(bar))
+        draw_text("Setas ou A/D: mudar o volume  •  Esc: voltar", small_font, LIGHT_GRAY,
+                  SCREEN_WIDTH // 2, 565, "center", shadow=True)
 
     def draw_waiting(self):
         session = self.session

@@ -15,6 +15,7 @@ CONTROLES
 - P2: Setas andar e pular, N/M golpes, Vírgula super
 - Toque para trás na hora do golpe: PARRY. Dois toques numa direção: dash.
 - Esc: pausa. F11: tela cheia.
+- Volume (geral, música e efeitos) e tela cheia: Configurações, no menu ou na pausa.
 
 ONLINE (direto, pelo Radmin VPN)
 - Os dois instalam o Radmin VPN (grátis) e entram na mesma rede dele.

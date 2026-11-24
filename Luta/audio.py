@@ -93,6 +93,9 @@ _tracks = {}                 # grupo -> lista de arquivos
 _track_volume = {}           # arquivo -> volume (None = não deu para abrir)
 _music = {"group": None, "next": None, "volume": 1.0, "duck": False}
 _rng = random.Random()       # sorteio das trilhas (separado do random do jogo)
+# volume escolhido nas Configurações (0..1), por cima do nivelamento de cada som
+VOLUME_KINDS = ("master", "music", "effects")
+_volume = {kind: 1.0 for kind in VOLUME_KINDS}
 
 
 def pre_init():
@@ -310,7 +313,9 @@ def play_fighter(sound, side, kind):
     """Som de lutador (side 0 = P1, 1 = P2); kind "super" vai para o canal do SUPER."""
     if sound is not None and available():
         channels = SUPER_CHANNELS if kind == "super" else ATTACK_CHANNELS
-        pygame.mixer.Channel(channels[side]).play(sound)
+        channel = pygame.mixer.Channel(channels[side])
+        channel.play(sound)
+        channel.set_volume(_effects_volume())  # depois do play: o play volta o canal para 100%
 
 
 def pause_fighters():
@@ -338,7 +343,28 @@ def play(name):
     """Efeito do jogo (ver EFFECTS), se o arquivo existir."""
     sound = _effects.get(name)
     if sound is not None:
-        sound.play()
+        channel = sound.play()
+        if channel is not None:
+            channel.set_volume(_effects_volume())
+
+
+# ---------------- VOLUME ----------------
+def get_volume(kind):
+    """Volume escolhido (0..1): "master" (geral), "music" ou "effects"."""
+    return _volume[kind]
+
+
+def set_volume(kind, value):
+    _volume[kind] = max(0.0, min(1.0, float(value)))
+    if not available():
+        return
+    pygame.mixer.music.set_volume(_music_volume())
+    for index in range(MIXER_CHANNELS):  # o que já está tocando também muda na hora
+        pygame.mixer.Channel(index).set_volume(_effects_volume())
+
+
+def _effects_volume():
+    return _volume["master"] * _volume["effects"]
 
 
 # ---------------- TRILHAS ----------------
@@ -376,7 +402,8 @@ def duck_music(on):
 
 
 def _music_volume():
-    return _music["volume"] * (MUSIC_DUCK if _music["duck"] else 1.0)
+    return (_music["volume"] * (MUSIC_DUCK if _music["duck"] else 1.0)
+            * _volume["master"] * _volume["music"])
 
 
 def update():
