@@ -43,6 +43,8 @@ As versões publicadas em Releases são geradas automaticamente pelo GitHub Acti
   [Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/):
   "Curse of the Scarab" (luta) e a música do menu.
 - Sons de interface: [Kenney](https://www.kenney.nl/) (Interface Sounds), licença CC0.
+- Locutor "3, 2, 1, FIGHT!": "Three Two One Fight (Deep Voice)", freesound_community, via
+  [Pixabay](https://pixabay.com/) ([licença Pixabay](https://pixabay.com/service/license-summary/)).
 - Fonte: Turok.
 
 ## Licença
