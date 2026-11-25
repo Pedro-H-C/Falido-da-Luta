@@ -95,7 +95,8 @@ _music = {"group": None, "next": None, "volume": 1.0, "duck": False}
 _rng = random.Random()       # sorteio das trilhas (separado do random do jogo)
 # volume escolhido nas Configurações (0..1), por cima do nivelamento de cada som
 VOLUME_KINDS = ("master", "music", "effects")
-_volume = {kind: 1.0 for kind in VOLUME_KINDS}
+VOLUME_DEFAULTS = {"master": 0.2, "music": 0.2, "effects": 1.0}   # quem abre o jogo pela 1ª vez
+_volume = dict(VOLUME_DEFAULTS)
 
 
 def pre_init():
@@ -131,13 +132,14 @@ def setup():
 
 
 # ---------------- CARREGAR E NIVELAR ----------------
-def load(paths, level, starts=None, delay=0.0):
+def load(paths, level, starts=None, delay=0.0, keep=1.0):
     """Som pronto para tocar: sem o silêncio do começo e na altura "level" (ver LEVELS).
 
     paths: um arquivo ou uma lista de partes (cada parte nivelada sozinha).
     starts: segundo em que cada parte entra, contado do começo da primeira (sem isso, uma
             depois da outra). O som acaba junto com a última parte: as que iriam além somem nela.
     delay: segundos de silêncio antes do som.
+    keep: fração de cada arquivo que toca, do começo (0.5 = só a primeira metade, com fade no fim).
     None sem áudio ou com algum arquivo faltando.
     """
     if isinstance(paths, str):
@@ -152,7 +154,13 @@ def load(paths, level, starts=None, delay=0.0):
     if size != -16:              # formato inesperado: toca como veio, só a primeira parte
         return sounds[0]
 
-    parts = [_trim(array("h", sound.get_raw()), rate, channels) for sound in sounds]
+    parts = []
+    for sound in sounds:
+        raw = array("h", sound.get_raw())
+        if keep < 1:
+            raw = raw[:round(len(raw) * keep) // channels * channels]
+            _fade_out(raw, rate, channels)
+        parts.append(_trim(raw, rate, channels))
     lead = array("h", bytes(2 * round(delay * rate) * channels))
     if len(parts) == 1:
         return _leveled(lead + parts[0], rate, channels, level)

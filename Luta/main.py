@@ -13,8 +13,9 @@ import audio
 import fighter as fighter_module
 from online import DEFAULT_PORT, RELAY_PORT, NetSession, local_addresses, parse_address
 from fighter import (CHARACTERS, CHARACTERS_BY_ID, CONTROLS, DASH_COST, DIFFICULTIES, DIFFICULTY_LABELS, FRAME_MS,
-                     GROUND_MARGIN, SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_frames, get_sounds,
-                     get_super_fx, keyboard_buttons, pack_buttons, preload_characters, unpack_buttons)
+                     GROUND_MARGIN, SUPER, SUPER_MAX, Fighter, apply_alt_palette, get_flood_art, get_frames,
+                     get_sounds, get_super_fx, keyboard_buttons, pack_buttons, preload_characters,
+                     unpack_buttons)
 
 # Pasta do jogo: no .exe (PyInstaller) os arquivos ficam em sys._MEIPASS; rodando o .py, é a pasta
 # dele. Os caminhos "assets/..." são relativos a ela, então o jogo abre de qualquer lugar.
@@ -108,6 +109,28 @@ SONIC_MAGENTA = (255, 70, 200)   # franjas da onda (separação de cores)
 SONIC_CYAN = (70, 230, 255)
 BEAM_GROW = 5                # frames para o laser dos olhos chegar até a ponta
 BEAM_PULSE = 0.12            # quanto a espessura do laser pulsa
+# SUPER da enchente (Luba): teletransporte, tubarão e a arena enchendo de água
+FLOOD_OFF = 690              # nível da água (y da superfície) abaixo da tela: sem água
+FLOOD_TOP = -200             # nível com a arena inteira embaixo d'água
+FLOOD_FOLLOW = 0.32          # quanto o nível desenhado anda por frame até o nível certo
+FLOOD_BACK_ALPHA = 232       # água atrás dos lutadores (quase cobre o cenário)
+FLOOD_FRONT_ALPHA = 150      # crista da onda passando na frente dos lutadores
+FLOOD_VEIL = (25, 105, 185)  # véu azul na frente de quem está embaixo d'água...
+FLOOD_VEIL_ALPHA = 78        # ... com esta transparência
+FLOOD_WOBBLE = 16            # px que a água balança de lado com a arena submersa
+FLOOD_DRIFT = 45             # px que a onda vai e volta de lado
+# imagens do teletransporte em volta da troca (ms de jogo antes/depois dela): estrela, explosão,
+# coluna (cobre a troca inteira), dissipando, fiapos; a última some em TELEPORT_FADE
+TELEPORT_KEYS = (-230, -150, -75, 80, 170, 260)
+TELEPORT_BLEND = 45          # ms que uma imagem leva para virar a próxima
+TELEPORT_FADE = 90
+TELEPORT_COLORS = ((255, 255, 255), (150, 225, 255), (80, 150, 255), (165, 105, 255))
+WATER_COLORS = ((255, 255, 255), (200, 240, 255), (120, 205, 250), (50, 155, 235))
+PARALYZE_COLORS = ((255, 255, 255), (170, 225, 255), (110, 180, 255))
+VORTEX_SPIN = 1.15           # graus por ms de jogo que o redemoinho gira
+SHARK_GROW = 0.45            # o tubarão cresce isso até chegar no oponente
+SHARK_BITE = (34, 95)        # boca do tubarão: atrás da frente do oponente, abaixo do topo
+DISSOLVE_LIFE = 30           # frames do tubarão virando água no último acerto
 QUAKE_MAX = 14               # px do tremor da tela INTEIRA (com o HUD) no máximo
 QUAKE_CHARGE = 0.55          # até onde o tremor sobe enquanto o SUPER carrega
 QUAKE_DECAY = 0.965
@@ -167,6 +190,15 @@ dim_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
 dim_overlay.fill((12, 6, 24))
 # Camada transparente das ondas sonoras (limpa e redesenhada a cada frame)
 sonic_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+# Raios de luz embaixo d'água (SUPER da enchente): desenhados pequenos e esticados para a tela
+RAY_SCALE = 4
+ray_small = pygame.Surface((SCREEN_WIDTH // RAY_SCALE, SCREEN_HEIGHT // RAY_SCALE), pygame.SRCALPHA)
+ray_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+# Véu azul de quem está embaixo d'água (cor lisa com transparência: bem mais barato que tingir
+# a tela pixel a pixel)
+water_veil = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT)).convert()
+water_veil.fill(FLOOD_VEIL)
+water_veil.set_alpha(FLOOD_VEIL_ALPHA)
 # Câmera do SUPER sônico: superfícies criadas uma vez só (criar/copiar/pintar a tela inteira
 # todo frame custa caro; blit é quase de graça). Cabem até 30% de zoom.
 POST_SIZE = (int(SCREEN_WIDTH * 1.3), int(SCREEN_HEIGHT * 1.3))
@@ -546,6 +578,68 @@ class Debris:
         self.bounced = False
 
 
+class Bubble:
+    """Bolha subindo embaixo d'água, balançando de lado; estoura ao chegar na superfície."""
+    __slots__ = ("x", "y", "r", "vy", "phase", "life")
+
+    def __init__(self, x, y, r, vy, life):
+        self.x, self.y = x, y
+        self.r = r
+        self.vy = vy
+        self.phase = random.uniform(0, 2 * math.pi)
+        self.life = life
+
+
+_bubble_cache = {}
+_glow_cache = {}
+
+
+def bubble_image(r):
+    """Bolha de raio r: borda clara, miolo quase transparente e um brilho no alto."""
+    if r not in _bubble_cache:
+        size = 2 * r + 2
+        img = pygame.Surface((size, size), pygame.SRCALPHA)
+        c = (r + 1, r + 1)
+        pygame.draw.circle(img, (190, 232, 255, 45), c, r)
+        pygame.draw.circle(img, (225, 247, 255, 175), c, r, max(1, r // 4))
+        pygame.draw.circle(img, (255, 255, 255, 230), (r + 1 - r // 3, r + 1 - r // 3), max(1, r // 4))
+        _bubble_cache[r] = img
+    return _bubble_cache[r]
+
+
+def glow_image(radius, color, level):
+    """Brilho redondo (preto em volta) para somar na tela com BLEND_RGB_ADD; level 1..8."""
+    key = (radius, color, level)
+    if key not in _glow_cache:
+        img = pygame.Surface((radius * 2, radius * 2))
+        for r in range(radius, 0, -2):
+            k = (1 - r / radius) ** 2 * level / 8
+            pygame.draw.circle(img, tuple(int(c * k) for c in color), (radius, radius), r)
+        _glow_cache[key] = img
+    return _glow_cache[key]
+
+
+_cutin_sheets = {}
+
+
+def cutin_sheet(path, alt_palette=False):
+    """Sheet original (tamanho cheio) para recortar o rosto da faixa do SUPER, guardada para reuso."""
+    key = (path, alt_palette)
+    if key not in _cutin_sheets:
+        sheet = pygame.image.load(path).convert_alpha()
+        _cutin_sheets[key] = apply_alt_palette(sheet) if alt_palette else sheet
+    return _cutin_sheets[key]
+
+
+def pivot_image(image, px, py):
+    """Cópia com o ponto (px, py) no centro: girando ela, a imagem gira em volta desse ponto."""
+    w, h = image.get_size()
+    half_w, half_h = max(px, w - px), max(py, h - py)
+    padded = pygame.Surface((2 * half_w, 2 * half_h), pygame.SRCALPHA)
+    padded.blit(image, (half_w - px, half_h - py))
+    return padded
+
+
 def arc_points(cx, cy, radius, width, angle, span, steps=20):
     """Polígono de um arco grosso (pedaço de anel) em volta de (cx, cy)."""
     outer, inner = radius + width / 2, max(1.0, radius - width / 2)
@@ -612,6 +706,8 @@ class Effects:
         self.glints = []        # brilho dos óculos
         self.sonic = None       # rajada sônica em andamento
         self.beam = None        # laser dos olhos em andamento
+        self.flood = None       # SUPER da enchente em andamento (teletransporte, tubarão, água)
+        self.bubbles = []
         self.combo = 0          # acertos seguidos do SUPER (rajada, furadas do chapéu)
         self.cutin = None       # faixa cinematográfica do SUPER
         self.hitstop = 0        # frames com o jogo congelado
@@ -649,6 +745,9 @@ class Effects:
 
     def on_hit(self, event):
         x, y = event.pos
+        flood = self.flood
+        if flood is not None and event.attack_type == SUPER and event.color == flood["fighter"].super_color:
+            self._flood_hit(event)
         if event.kind == "parry":
             audio.play("parry")
             self.hitstop = max(self.hitstop, PARRY_HITSTOP_FRAMES)
@@ -707,7 +806,7 @@ class Effects:
             self.impacts.append(Impact(x, y, 120, YELLOW, star=True, life=18))
             self._shake(10, 28)
 
-    def on_super_start(self, fighter):
+    def on_super_start(self, fighter, target=None):
         """Congela o jogo com a tela escura enquanto o lutador junta energia."""
         data = fighter.super_data or {}
         freeze = data.get("freeze", SUPER_FREEZE_FRAMES)
@@ -726,6 +825,8 @@ class Effects:
             self.glints.append(Glint(gx, gy, GLINT_SIZE, freeze + 8))
         if "cutin" in data:
             self.start_cutin(fighter, data, freeze)
+        if fighter.flood:
+            self.start_flood(fighter, target)
         if fighter.sonic:
             # o chão começa a tremer já na carga, cada vez mais forte até o estouro
             self.quake = max(self.quake, 0.12)
@@ -733,9 +834,13 @@ class Effects:
             self.focus = (cx, cy)
 
     def start_cutin(self, fighter, data, frames):
-        """Faixa cinematográfica: rosto de quem soltou o SUPER e o nome do golpe, cruzando a tela."""
+        """Faixa cinematográfica: rosto de quem soltou o SUPER e o nome do golpe, cruzando a tela.
+        O rosto vem de um frame do SUPER ("frame") ou da sheet original em tamanho cheio ("sheet")."""
         cut = data["cutin"]
-        face = fighter.animation_list[7][cut["frame"]].subsurface(pygame.Rect(cut["box"]))
+        if "sheet" in cut:
+            face = cutin_sheet(cut["sheet"], fighter.alt_palette).subsurface(pygame.Rect(cut["box"]))
+        else:
+            face = fighter.animation_list[7][cut["frame"]].subsurface(pygame.Rect(cut["box"]))
         scale = CUTIN_H * 1.25 / face.get_height()
         portrait = pygame.transform.smoothscale(face, (round(face.get_width() * scale), round(face.get_height() * scale)))
         if fighter.flip:
@@ -769,6 +874,9 @@ class Effects:
             return
         if fighter.beam:
             self.start_beam(fighter, target)
+            return
+        if fighter.flood:
+            self.on_flood_impact(fighter, target)
             return
         if fighter.hat is not None:
             self.start_hat(fighter)
@@ -938,6 +1046,436 @@ class Effects:
         self._burst(x, y, 1, self.palette(fighter.super_color), 14, (2, 7), math.pi)
         self.impacts.append(Impact(x, y, 50, fighter.super_color, star=False, life=12))
 
+    # ---------------- SUPER DA ENCHENTE ----------------
+    def start_flood(self, fighter, target):
+        """Prepara o SUPER da enchente: desenhos virados para o lado de quem soltou e o aviso no
+        oponente paralisado. O resto (teletransporte, água, tubarão) segue o tempo de jogo do
+        SUPER, frame a frame (ver _update_flood)."""
+        art = get_flood_art(fighter.character["id"])
+        data = fighter.flood
+        flip = fighter.flip
+
+        def facing(image):
+            return pygame.transform.flip(image, True, False) if flip else image
+
+        if "waves_front" not in art:
+            art["waves_front"] = {n: self._front_wave(img, data["surface"][n]) for n, img in art["waves"].items()}
+        water = data["water_fx"]
+        pieces = []   # redemoinho, jato, tubarão, tubarão desfazendo: recortados no que tem desenho
+        for frame, (sx, sy) in zip(art["water"], water["spots"]):
+            rect = frame.get_bounding_rect()
+            pieces.append({"image": facing(frame.subsurface(rect).copy()), "x": sx + rect.x, "y": sy + rect.y,
+                           "w": rect.width, "h": rect.height})
+        vx, vy = water["vortex"]
+        sx, sy = water["spots"][0]
+        self.flood = {
+            "fighter": fighter, "target": target, "art": art, "pieces": pieces,
+            "teleport": [facing(img) for img in art["teleport"]],
+            "vortex": facing(pivot_image(art["water"][0], vx, vy)), "vortex_at": (sx + vx, sy + vy),
+            "level": float(FLOOD_OFF), "t": -1.0, "rt": 0, "active": True, "father": False, "rising": True,
+            "shark": None, "bite_age": 0, "bite_pulse": 0.0, "burst": None, "drips": 0,
+        }
+        if target is not None and target.paralyzed:  # o oponente congela: anel gelado e aviso
+            cx, cy = target.rect.center
+            self.impacts.append(Impact(cx, cy, 160, (120, 190, 255), star=False, life=24))
+            self.impacts.append(Impact(cx, cy, 95, WHITE, star=False, life=15))
+            self._burst(cx, cy, 1, PARALYZE_COLORS, 24, (2, 8), math.pi)
+            self.popup("PARALISADO!", (150, 210, 255), cx, max(150, target.rect.y - 20))
+
+    @staticmethod
+    def _front_wave(wave, surface):
+        """A crista que passa NA FRENTE dos lutadores: a onda até um pouco abaixo da superfície,
+        sumindo aos poucos (embaixo disso eles só ficam azulados)."""
+        front = wave.copy()
+        ramp = pygame.Surface(wave.get_size(), pygame.SRCALPHA)
+        ramp.fill((255, 255, 255, 255), (0, 0, wave.get_width(), surface))
+        for y in range(surface, min(wave.get_height(), surface + 90)):
+            ramp.fill((255, 255, 255, round(255 * (1 - (y - surface) / 90))), (0, y, wave.get_width(), 1))
+        front.blit(ramp, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        return front
+
+    @staticmethod
+    def _flood_level(fighter, t):
+        """Nível certo da água (y da superfície) no tempo t (ms de jogo desde o começo do SUPER):
+        sobe depressa do chão até cobrir a arena, fica um instante e escoa."""
+        line = fighter.flood["timeline"]
+        start = fighter.super_start_ms
+        t_vortex, t_splash, t_shark = start(line["vortex"]), start(line["splash"]), start(line["shark"])
+        t_drain, t_end = start(line["drain"]), start(line["drain"] + 1)
+        keys = ((t_vortex, FLOOD_OFF), (t_vortex + 120, 520), (t_splash, 390), (t_shark, 110),
+                (t_shark + 110, FLOOD_TOP), (t_drain, FLOOD_TOP), (t_drain + 100, 150),
+                (t_drain + 220, 450), (t_end, FLOOD_OFF))
+        if t <= keys[0][0] or t >= keys[-1][0]:
+            return FLOOD_OFF
+        for (t0, y0), (t1, y1) in zip(keys, keys[1:]):
+            if t <= t1:
+                return y0 + (y1 - y0) * (t - t0) / max(1, t1 - t0)
+        return FLOOD_OFF
+
+    @staticmethod
+    def _hand_water(flood, fighter, t):
+        """Água nas mãos do pai agora: redemoinho girando e jato se abrindo. Retorna
+        {"vortex": (x, y, ângulo, escala, alfa), "splash": (x da mão, y, escala, alfa)} (só os que aparecem)."""
+        line = fighter.flood["timeline"]
+        start = fighter.super_start_ms
+        t_vortex, t_splash, t_shark = start(line["vortex"]), start(line["splash"]), start(line["shark"])
+        direction = -1 if fighter.flip else 1
+        shown = {}
+        if t_vortex <= t < t_splash + 90:   # aparece girando e some girando mais rápido quando sai o jato
+            local = t - t_vortex
+            grow = 1 - (1 - min(1.0, local / 110)) ** 3
+            fade = 1 - max(0.0, (t - t_splash) / 90)
+            scale = (0.45 + 0.55 * grow) * (1 + 0.3 * (1 - fade))
+            x, y = fighter.super_point(*flood["vortex_at"])
+            shown["vortex"] = (x, y, -local * VORTEX_SPIN * direction * (1 + (1 - fade)), scale, fade)
+        if t_splash <= t < t_shark + 110:   # estoura das mãos para a frente e se abre
+            k = min(1.0, (t - t_splash) / (t_shark - t_splash) * 1.4)
+            piece = flood["pieces"][1]
+            alpha = 1.0 if t < t_shark else 1 - (t - t_shark) / 110
+            x, y = fighter.super_point(piece["x"], piece["y"] + piece["h"] / 2)
+            shown["splash"] = (x, y, 0.7 + 0.5 * (1 - (1 - k) ** 2), alpha)
+        return shown
+
+    def _shark_pose(self, flood, fighter, target, t):
+        """(x, y, inclinação do nariz em graus, escala) do tubarão: sai das mãos nadando em
+        zigue-zague até o oponente e, chegando, morde se debatendo."""
+        piece = flood["pieces"][2]
+        line = fighter.flood["timeline"]
+        direction = -1 if fighter.flip else 1
+        sx, sy = fighter.super_point(piece["x"] + piece["w"] / 2, piece["y"] + piece["h"] / 2)
+        end_scale = 1 + SHARK_GROW
+        if target is not None:
+            ex = target.rect.centerx - direction * (SHARK_BITE[0] + piece["w"] * end_scale * 0.25)
+            ey = target.rect.y + SHARK_BITE[1]
+        else:
+            ex, ey = sx + direction * 400, sy
+        if fighter.frame_index == line["shark"]:
+            u = (t - fighter.super_start_ms(line["shark"])) / fighter.frame_ms(7, line["shark"])
+            u = max(0.0, min(1.0, u))
+            e = u * u * (3 - 2 * u)
+            wave = math.sin(u * math.pi * 3)
+            return (sx + (ex - sx) * e, sy + (ey - sy) * e + wave * 18 * (1 - u),
+                    math.cos(u * math.pi * 3) * 12 * (1 - u), 1 + SHARK_GROW * e)
+        age = flood["bite_age"]
+        return (ex + math.sin(age * 1.3) * 6, ey + math.sin(age * 1.9) * 4,
+                math.sin(age * 0.8) * 11, end_scale + flood["bite_pulse"])
+
+    def _update_flood(self):
+        """Um frame da enchente (tempo real): nível da água, trocas do teletransporte, tubarão,
+        bolhas, respingos, gotas, a paralisia faiscando e o fim do efeito."""
+        self._update_bubbles()
+        flood = self.flood
+        if flood is None:
+            return
+        flood["rt"] += 1
+        fighter, target = flood["fighter"], flood["target"]
+        data = fighter.flood
+        line = data["timeline"]
+        direction = -1 if fighter.flip else 1
+        t = fighter.super_elapsed_ms()
+        if t is None:
+            if flood["active"]:   # acabou ou levou golpe no meio: se o pai estava na tela, some num estalo
+                flood["active"] = False
+                if flood["father"]:
+                    self._teleport_flash(fighter)
+                flood["father"] = False
+                flood["shark"] = None
+            flood["rising"] = False
+            goal = FLOOD_OFF
+        else:
+            for swap in data["teleport"]["swap"]:   # troca Luba <-> pai: estalo de luz
+                if flood["t"] < fighter.super_start_ms(swap) <= t:
+                    self._teleport_flash(fighter)
+            first, last = data["teleport"]["swap"]
+            flood["father"] = first <= fighter.frame_index < last
+            flood["rising"] = fighter.frame_index < line["drain"]
+            goal = self._flood_level(fighter, t)
+            index = fighter.frame_index
+            if index == line["shark"] or (index == line["bite"] and flood["burst"] is None):
+                if index == line["bite"]:
+                    flood["bite_age"] += 1
+                flood["shark"] = self._shark_pose(flood, fighter, target, t)
+                if index == line["shark"]:   # rastro de bolhas e espuma atrás do tubarão
+                    x, y, _, scale = flood["shark"]
+                    tail = x - direction * flood["pieces"][2]["w"] * scale * 0.45
+                    for _ in range(2):
+                        self.bubbles.append(Bubble(tail + random.uniform(-10, 10), y + random.uniform(-18, 18),
+                                                   random.randint(3, 8), -random.uniform(1, 3), random.randint(30, 60)))
+                    self.sparks.append(Spark(tail, y + random.uniform(-12, 12), -direction * random.uniform(2, 6),
+                                             random.uniform(-2, 1), random.randint(8, 14),
+                                             random.choice(WATER_COLORS), 3))
+            elif index >= line["drain"]:
+                self._shark_burst(flood)   # nocaute antes do último acerto: o tubarão vira água igual
+            hands = self._hand_water(flood, fighter, t)
+            if "vortex" in hands and flood["rt"] % 2 == 0:   # o giro joga gotas para fora
+                x, y, _, scale, alpha = hands["vortex"]
+                spin = -direction
+                for _ in range(2):
+                    a = random.uniform(0, 2 * math.pi)
+                    r = 46 * scale
+                    speed = random.uniform(3, 6)
+                    self.sparks.append(Spark(x + math.cos(a) * r, y + math.sin(a) * r,
+                                             -math.sin(a) * speed * spin, math.cos(a) * speed * spin,
+                                             random.randint(7, 12), random.choice(WATER_COLORS), 2))
+            flood["t"] = t
+        before = flood["level"]
+        flood["level"] += (goal - flood["level"]) * FLOOD_FOLLOW
+        level = flood["level"]
+        speed = level - before
+
+        # respingos na superfície quando a água sobe ou desce depressa
+        if 0 < level < SCREEN_HEIGHT and abs(speed) > 2.5:
+            for _ in range(min(7, int(abs(speed) / 3))):
+                self.sparks.append(Spark(random.uniform(0, SCREEN_WIDTH), level + random.uniform(-10, 25),
+                                         random.uniform(-2, 2), -random.uniform(5, 13), random.randint(12, 24),
+                                         random.choice(WATER_COLORS), random.randint(2, 4)))
+        # bolhas subindo embaixo d'água
+        if level < SCREEN_HEIGHT - 40:
+            top = max(0.0, level) + 20
+            for _ in range(1 + 2 * (level < 0) + (random.random() < 0.5)):
+                self.bubbles.append(Bubble(random.uniform(0, SCREEN_WIDTH), random.uniform(top, SCREEN_HEIGHT + 10),
+                                           random.randint(2, 7), -random.uniform(1.2, 3.4), random.randint(40, 90)))
+        # escoou: gotas pingando do alto por um instante
+        if not flood["rising"] and 200 < level < FLOOD_OFF - 15 and flood["drips"] < 40:
+            flood["drips"] += 1
+            for _ in range(2):
+                floor = random.uniform(*FLOOR_Y)
+                self.debris.append(Debris(random.uniform(0, SCREEN_WIDTH), random.uniform(-30, 0),
+                                          random.uniform(-0.3, 0.3), random.uniform(5, 9), 0.55, floor,
+                                          random.randint(45, 70), random.randint(1, 3),
+                                          random.choice(((170, 220, 255), (120, 190, 245), (220, 245, 255)))))
+        # paralisado: faíscas geladas correndo pelo corpo
+        if target is not None and target.paralyzed and flood["rt"] % 3 == 0:
+            r = target.rect
+            for _ in range(2):
+                self.sparks.append(Spark(random.uniform(r.left - 10, r.right + 10), random.uniform(r.top, r.bottom - 20),
+                                         random.uniform(-2, 2), random.uniform(-3, 1), random.randint(6, 12),
+                                         random.choice(PARALYZE_COLORS), 2))
+        flood["bite_pulse"] *= 0.8
+        if flood["burst"] is not None:
+            flood["burst"]["age"] += 1
+        # fim: sem água, sem tubarão e o pai já voltou
+        burst_done = flood["burst"] is None or flood["burst"]["age"] > DISSOLVE_LIFE
+        if not flood["active"] and level > FLOOD_OFF - 15 and burst_done:
+            self.flood = None
+
+    def _update_bubbles(self):
+        level = self.flood["level"] if self.flood is not None else FLOOD_OFF
+        for b in self.bubbles:
+            b.y += b.vy
+            b.x += math.sin(b.phase + b.life * 0.25) * 0.7
+            b.life -= 1
+        # estoura ao chegar na superfície (ou quando a água vai embora)
+        self.bubbles = [b for b in self.bubbles if b.life > 0 and level + 4 < b.y > -20]
+
+    def _teleport_flash(self, fighter):
+        """Troca pelo teletransporte (Luba <-> pai): estalo de luz, raios e um anel no chão."""
+        data = fighter.flood["teleport"]
+        cx, cy = fighter.super_point(data["center"][0], data["center"][1] - 160)   # meio do corpo
+        gx, gy = fighter.super_point(*data["center"])
+        self.flash = max(self.flash, 70)
+        self.impacts.append(Impact(cx, cy, 170, (120, 170, 255), star=False, life=18))
+        self.impacts.append(Impact(cx, cy, 100, WHITE, star=False, life=12))
+        self._burst(cx, cy, 1, TELEPORT_COLORS, 34, (4, 13), math.pi)
+        self.ground_rings.append(GroundRing(gx, gy, (120, 160, 255), size=300, life=30))
+        self._shake(5, 12)
+
+    def on_flood_impact(self, fighter, target):
+        """O tubarão chega no oponente: a água explode em volta dele."""
+        if self.flood is None or target is None:
+            return
+        x, y = target.rect.centerx, target.rect.y + SHARK_BITE[1]
+        self._water_splash(x, y, -1 if fighter.flip else 1, 26)
+        self.impacts.append(Impact(x, y, 130, (90, 190, 255), star=False, life=16))
+        self.flash = max(self.flash, 60)
+        self._shake(7, 14)
+
+    def _flood_hit(self, event):
+        """Cada mordida espirra água; a última (ou a que nocauteia) faz o tubarão virar água."""
+        flood = self.flood
+        x, y = event.pos
+        self._water_splash(x, y, event.direction, 14 if event.kind == "multi" else 10)
+        flood["bite_pulse"] = 0.16
+        if event.kind == "hit" or event.ko:
+            self._shark_burst(flood)
+
+    def _water_splash(self, x, y, direction, count):
+        """Gotas voando para cima e para a frente, e bolhas."""
+        for _ in range(count):
+            angle = -math.pi / 2 + direction * random.uniform(0.1, 1.2) + random.uniform(-0.5, 0.5)
+            speed = random.uniform(4, 13)
+            self.sparks.append(Spark(x, y, math.cos(angle) * speed, math.sin(angle) * speed,
+                                     random.randint(14, 26), random.choice(WATER_COLORS), random.randint(2, 5)))
+        for _ in range(count // 2):
+            self.bubbles.append(Bubble(x + random.uniform(-30, 30), y + random.uniform(-20, 30),
+                                       random.randint(3, 9), -random.uniform(1.5, 4), random.randint(25, 50)))
+
+    def _shark_burst(self, flood):
+        """O tubarão se desfaz em água (imagem do tubarão desfazendo, crescendo e sumindo)."""
+        shark = flood["shark"]
+        if shark is None or flood["burst"] is not None:
+            return
+        x, y, angle, scale = shark
+        flood["burst"] = {"x": x, "y": y, "angle": angle, "scale": scale, "age": 0}
+        flood["shark"] = None
+        self._water_splash(x, y, -1 if flood["fighter"].flip else 1, 46)
+        self.impacts.append(Impact(x, y, 170, (110, 200, 255), star=False, life=20))
+        self.impacts.append(Impact(x, y, 110, WHITE, star=False, life=14))
+        self.flash = max(self.flash, 100)
+        self._shake(10, 22)
+
+    def _water_x(self, flood, offset_x):
+        """x da água (onda e textura têm a mesma largura, um pouco maior que a tela): vai e volta."""
+        width = flood["art"]["texture"].get_width()
+        x = (SCREEN_WIDTH - width) / 2 + math.sin(flood["rt"] * 0.045) * FLOOD_DRIFT + offset_x
+        return max(SCREEN_WIDTH - width, min(0, x))
+
+    @staticmethod
+    def _crests(flood, level):
+        """Ondas desenhadas agora e a opacidade de cada uma (uma vira a outra aos poucos):
+        subindo, a onda baixa vira a alta; escoando, a que desce vira os respingos. Raiz
+        quadrada: no meio da troca as duas juntas ainda cobrem quase como uma só."""
+        if flood["rising"]:
+            first, second, w = 1, 2, (430 - level) / 140
+        else:
+            first, second, w = 4, 5, (level - 230) / 160
+        w = max(0.0, min(1.0, w))
+        return [(n, math.sqrt(k)) for n, k in ((first, 1 - w), (second, w)) if k > 0.02]
+
+    def draw_water_back(self, offset):
+        """Água atrás dos lutadores: a onda subindo/descendo e, embaixo dela, o "tudo água"
+        (com a arena submersa ele balança de lado em faixas, como água se mexendo)."""
+        flood = self.flood
+        if flood is None or flood["level"] >= SCREEN_HEIGHT + 2:
+            return
+        ox, oy = offset
+        art, data = flood["art"], flood["fighter"].flood
+        level = flood["level"] + math.sin(flood["rt"] * 0.16) * 5
+        x0 = self._water_x(flood, ox)
+        crests = self._crests(flood, level)
+        tex_top = min(level - data["surface"][n] + art["waves"][n].get_height() - data["fade"] for n, _ in crests)
+        texture = art["texture"]
+        texture.set_alpha(FLOOD_BACK_ALPHA)
+        top = round(tex_top + oy)
+        wobble = FLOOD_WOBBLE * max(0.0, min(1.0, -level / 150))
+        if top < SCREEN_HEIGHT:
+            if wobble < 0.5:
+                screen.blit(texture, (round(x0), top))
+            else:
+                low, high = SCREEN_WIDTH - texture.get_width(), 0
+                for y in range(max(0, top), SCREEN_HEIGHT, 8):
+                    x = max(low, min(high, x0 + wobble * math.sin(y * 0.03 + flood["rt"] * 0.21)))
+                    screen.blit(texture, (round(x), y), (0, y - top, texture.get_width(), 8))
+        for n, weight in crests:
+            wave = art["waves"][n]
+            wave.set_alpha(round(FLOOD_BACK_ALPHA * weight))
+            screen.blit(wave, (round(x0), round(level - data["surface"][n] + oy)))
+
+    def draw_water_front(self, offset):
+        """Na frente dos lutadores: quem está embaixo d'água fica azulado, a crista da onda passa
+        por cima deles e, com a arena submersa, raios de luz descem do alto."""
+        flood = self.flood
+        if flood is None or flood["level"] >= SCREEN_HEIGHT + 2:
+            return
+        ox, oy = offset
+        art, data = flood["art"], flood["fighter"].flood
+        level = flood["level"] + math.sin(flood["rt"] * 0.16) * 5
+        top = max(0, round(level + 40 + oy))
+        if top < SCREEN_HEIGHT:
+            screen.blit(water_veil, (0, top), (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT - top))
+        x0 = self._water_x(flood, ox)
+        for n, weight in self._crests(flood, level):
+            y = level - data["surface"][n] + oy
+            if y + data["surface"][n] + 90 > 0:
+                wave = art["waves_front"][n]
+                wave.set_alpha(round(FLOOD_FRONT_ALPHA * weight))
+                screen.blit(wave, (round(x0), round(y)))
+        under = max(0.0, min(1.0, -level / 160))
+        if under > 0.05:
+            self._draw_rays(under, flood["rt"])
+
+    @staticmethod
+    def _draw_rays(strength, t):
+        """Raios de luz descendo inclinados e balançando (arena submersa)."""
+        ray_small.fill((0, 0, 0, 0))
+        w, h = ray_small.get_size()
+        for i in range(5):
+            x = (i * 61 + t * 0.35) % (w + 60) - 30
+            sway = math.sin(t * 0.03 + i * 1.7) * 8
+            alpha = int((24 + 12 * math.sin(t * 0.05 + i)) * strength)
+            pygame.draw.polygon(ray_small, (190, 235, 255, alpha),
+                                [(x + sway, 0), (x + sway + 14, 0), (x + 46, h), (x + 24, h)])
+        pygame.transform.smoothscale(ray_small, (SCREEN_WIDTH, SCREEN_HEIGHT), ray_overlay)
+        screen.blit(ray_overlay, (0, 0))
+
+    def _draw_flood(self, ox, oy):
+        """Teletransporte, água nas mãos, tubarão, tubarão desfazendo e bolhas (por cima de tudo)."""
+        flood = self.flood
+        if flood is None:
+            return
+        fighter = flood["fighter"]
+        direction = -1 if fighter.flip else 1
+        t = fighter.super_elapsed_ms()
+        if t is not None:
+            self._draw_teleport(flood, fighter, t, ox, oy)
+            hands = self._hand_water(flood, fighter, t)
+            if "vortex" in hands:
+                x, y, angle, scale, alpha = hands["vortex"]
+                img = pygame.transform.rotozoom(flood["vortex"], angle, scale)
+                img.set_alpha(round(255 * alpha))
+                screen.blit(img, img.get_rect(center=(round(x + ox), round(y + oy))))
+            if "splash" in hands:   # cresce a partir das mãos (lado de trás do jato)
+                x, y, scale, alpha = hands["splash"]
+                img = pygame.transform.rotozoom(flood["pieces"][1]["image"], 0, scale)
+                img.set_alpha(round(255 * max(0.0, alpha)))
+                left = x if direction > 0 else x - img.get_width()
+                screen.blit(img, (round(left + ox), round(y - img.get_height() / 2 + oy)))
+        if flood["shark"] is not None:
+            x, y, angle, scale = flood["shark"]
+            img = pygame.transform.rotozoom(flood["pieces"][2]["image"], angle * direction, scale)
+            screen.blit(img, img.get_rect(center=(round(x + ox), round(y + oy))))
+        burst = flood["burst"]
+        if burst is not None and burst["age"] <= DISSOLVE_LIFE:
+            k = burst["age"] / DISSOLVE_LIFE
+            img = pygame.transform.rotozoom(flood["pieces"][3]["image"], burst["angle"] * direction,
+                                            burst["scale"] * (1 + 0.5 * k))
+            img.set_alpha(round(255 * (1 - k) ** 1.4))
+            center = (round(burst["x"] + direction * 50 * k + ox), round(burst["y"] - 12 * k + oy))
+            screen.blit(img, img.get_rect(center=center))
+        for b in self.bubbles:
+            screen.blit(bubble_image(b.r), (round(b.x - b.r + ox), round(b.y - b.r + oy)))
+
+    def _draw_teleport(self, flood, fighter, t, ox, oy):
+        """Teletransporte em volta de quem está trocando: cada imagem vira a próxima aos poucos
+        (sem pulo), a coluna cobre o momento da troca e um brilho azul é somado nessa hora."""
+        data = fighter.flood["teleport"]
+        frames = flood["teleport"]
+        cx, base = fighter.super_point(*data["center"])
+        keys = TELEPORT_KEYS
+        span = keys[-1] + TELEPORT_FADE - keys[0]
+        for swap in data["swap"]:
+            moment = fighter.super_start_ms(swap)
+            rel = t - moment
+            if not keys[0] <= rel < keys[-1] + TELEPORT_FADE:
+                continue
+            index = max(i for i in range(len(frames)) if keys[i] <= rel)
+            blend = min(1.0, (rel - keys[index]) / TELEPORT_BLEND)
+            layers = [(index - 1, math.sqrt(1 - blend)), (index, math.sqrt(blend))] if index else [(0, blend)]
+            if rel >= keys[-1]:   # fiapos sumindo
+                layers = [(len(frames) - 1, 1 - (rel - keys[-1]) / TELEPORT_FADE)]
+            grow = 0.9 + 0.2 * (rel - keys[0]) / span
+            for i, alpha in layers:
+                if alpha <= 0.02:
+                    continue
+                img = frames[i]
+                img = pygame.transform.smoothscale(img, (round(img.get_width() * grow), round(img.get_height() * grow)))
+                img.set_alpha(round(255 * alpha))
+                screen.blit(img, (round(cx - img.get_width() / 2 + ox), round(base - data["base"] * grow + oy)))
+            near = max(0.0, 1 - abs(rel) / 170)
+            if near > 0.06:
+                glow = glow_image(150, (70, 120, 255), max(1, round(near * 8)))
+                screen.blit(glow, (round(cx - 150 + ox), round(base - 330 + oy)), special_flags=pygame.BLEND_RGB_ADD)
+
     def spawn_rocks(self, center_x, count):
         """Pedrinhas pulando do chão da arena inteira (mais alto perto de quem estourou)."""
         for _ in range(count):
@@ -1000,6 +1538,7 @@ class Effects:
             self.dim = max(0, self.dim - 10)
         self._update_sonic()
         self._update_beam()
+        self._update_flood()
         self._update_camera()
         self._update_cutin()
 
@@ -1086,6 +1625,7 @@ class Effects:
             pygame.draw.circle(screen, color, (d.x + ox, d.y + oy), d.size)
         self._draw_sonic(ox, oy)
         self._draw_beam(ox, oy)
+        self._draw_flood(ox, oy)
         for impact in self.impacts:
             t = 1 - impact.life / impact.max_life  # 0 -> 1
             cx, cy = impact.x + ox, impact.y + oy
@@ -1329,7 +1869,7 @@ class Match:
                     name = SIGNAL_SOUNDS[signal]
                     audio.play_fighter(get_sounds(attacker.character["id"]).get(name), side, name)
                 if signal == "super_start":
-                    self.effects.on_super_start(attacker)
+                    self.effects.on_super_start(attacker, defender)
                 elif signal == "super_impact":
                     self.effects.on_super_impact(attacker, defender)
                 elif signal == "land":
@@ -1378,6 +1918,7 @@ class Match:
         ox, oy = offset
         self.draw_background(offset)
         self.effects.draw_dim()
+        self.effects.draw_water_back(offset)   # enchente: a água fica atrás dos lutadores...
 
         ground = SCREEN_HEIGHT - GROUND_MARGIN
         for f in self.fighters:
@@ -1391,6 +1932,7 @@ class Match:
             f.draw(screen, offset)
         for f in self.fighters:
             f.draw_hat(screen, offset)
+        self.effects.draw_water_front(offset)  # ... e passa na frente deles (azulados embaixo d'água)
         self.effects.draw(offset)
         self.effects.draw_cutin()
 
@@ -1966,7 +2508,7 @@ class Game:
         self.wait_started = 0
         self.settings_back = MAIN_MENU   # para onde as Configurações voltam (menu ou pausa)
         for kind, _, key in VOLUME_ROWS:
-            value = self.config.get(key, 1.0)
+            value = self.config.get(key, audio.VOLUME_DEFAULTS[kind])
             if isinstance(value, (int, float)):
                 audio.set_volume(kind, value)
         audio.music("menu")

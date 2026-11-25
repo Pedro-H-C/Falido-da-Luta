@@ -1,6 +1,6 @@
 # Falido da Luta
 
-Jogo de luta 2D feito em Python com [pygame](https://www.pygame.org/): 6 lutadores, golpe rápido,
+Jogo de luta 2D feito em Python com [pygame](https://www.pygame.org/): 7 lutadores, golpe rápido,
 golpe forte, SUPER de cada personagem, parry, dash, modo contra a CPU (3 dificuldades),
 dois jogadores no mesmo PC e modo online (direto pelo Radmin VPN / mesmo Wi-Fi; guia em
 [Luta/online/COMO_JOGAR_ONLINE.md](Luta/online/COMO_JOGAR_ONLINE.md)).
@@ -45,6 +45,8 @@ As versões publicadas em Releases são geradas automaticamente pelo GitHub Acti
 - Sons de interface: [Kenney](https://www.kenney.nl/) (Interface Sounds), licença CC0.
 - Locutor "3, 2, 1, FIGHT!": "Three Two One Fight (Deep Voice)", freesound_community, via
   [Pixabay](https://pixabay.com/) ([licença Pixabay](https://pixabay.com/service/license-summary/)).
+- Golpe forte do Antonio: ["Blazing Fire"](https://pixabay.com/sound-effects/film-special-effects-blazing-fire-394355/),
+  via Pixabay ([licença Pixabay](https://pixabay.com/service/license-summary/)).
 - Fonte: Turok.
 
 ## Licença

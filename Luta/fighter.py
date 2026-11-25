@@ -90,6 +90,10 @@ HAT_DRAG_TIMER = 8         # frames que o oponente ainda vai até o lugar depois
 HAT_RECOVER_EXTRA = 6      # depois de solto, levanta um pouco depois de quem jogou terminar a pose
 HAT_LIFE = 300             # segurança: o chapéu some depois disso
 HAT_TRAIL = 8              # posições guardadas para o rastro
+# SUPER da enchente (personagens com "flood"): o oponente fica paralisado desde o começo até a
+# água chegar; aí o tubarão morde várias vezes (como a rajada sônica) e o último acerto arremessa
+PARALYZE_MARGIN = 12       # frames de folga da paralisia depois do impacto (segurança)
+FLOOD_RECOVER_EXTRA = 4    # depois do último acerto, só levanta um pouco depois de quem soltou voltar
 
 # Velocidade (ms por frame) de cada animação; o resto usa 100.
 # O SUPER com sprite próprio usa o "frame_ms" do personagem.
@@ -150,7 +154,7 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #   impact_frame -> frame em que o golpe acerta (sem isso, o do meio)
 #   freeze   -> frames de congelamento no começo (sem isso, o padrão do main)
 #   name, cutin -> faixa cinematográfica no congelamento: nome do golpe e recorte (x, y, largura,
-#               altura) do rosto no frame "frame" do SUPER
+#               altura) do rosto no frame "frame" do SUPER, ou na imagem "sheet" em tamanho cheio
 #   sonic    -> rajada sônica: "hits" acertos, um a cada "every" frames; as ondas saem de "origin"
 #               (à frente do centro, acima do chão)
 #   glint    -> brilho de lente no começo: pixel (x, y) do frame 0 do SUPER
@@ -163,12 +167,27 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #               é esticada dos olhos até o oponente ou o alcance. "eyes" = {frame do SUPER: pixel
 #               de onde o raio sai}; o raio aparece só nesses frames. "height" = espessura na tela.
 #               Acerta como a rajada sônica: "hits" acertos, um a cada "every" frames.
+#   flood    -> enchente: no começo do SUPER o oponente fica paralisado (parado no tempo) até o
+#               impacto; aí acerta como a rajada sônica ("hits" acertos, um a cada "every" frames)
+#               e o oponente só levanta quando a animação acaba. O resto é desenho (main.py):
+#               "teleport" = sheet do teletransporte (frames "size"; "base" = linha do chão no
+#               frame), que troca quem aparece nos frames "swap"; "water_fx" = água das mãos
+#               (frames "size", canto de cada um no frame do SUPER em "spots", "vortex" = miolo
+#               do redemoinho), na ordem redemoinho, jato, tubarão, tubarão desfazendo;
+#               "waves" = pasta com a água que enche a arena (frame1..5), "surface" = linha da
+#               superfície em cada onda, "fade" = quanto a onda some embaixo (a textura continua);
+#               "timeline" = frames do SUPER de cada fase: redemoinho, jato, tubarão nadando,
+#               mordidas, água baixando.
+#   shadow   -> x (no frame do SUPER) do meio entre os pés em cada frame: a sombra acompanha
 # Sem "super", o SUPER usa o golpe forte com brilho dourado.
 # sounds    -> sons do lutador (arquivos em SOUND_DIR): "atk1" (golpe rápido), "atk2" (golpe forte),
 #             "super". Os que faltarem ficam mudos; o volume é nivelado sozinho (audio.LEVELS).
 #             Em vez do nome do arquivo pode ser {"files": ..., "delay": s, "starts": (...)}:
 #             delay = segundos de espera antes de tocar; files com várias partes + starts = em que
-#             segundo cada parte entra (o som acaba junto com a última parte).
+#             segundo cada parte entra (o som acaba junto com a última parte); "keep": fração do
+#             arquivo que toca, do começo (0.5 = primeira metade).
+# row_scale -> {linha da sheet: fator}: amplia os frames de uma linha desenhada menor que as
+#             outras (o pé fica no lugar). Só o desenho; a hitbox não muda.
 # height    -> tamanho na tela em relação à sprite (1.0 = como está na sheet). O pé continua no chão
 #             e a hitbox não muda: é só o desenho (para as alturas ficarem proporcionais).
 SOUND_DIR = "assets/audio/FightersSounds"
@@ -191,6 +210,9 @@ CHARACTERS = [
             "frame_ms": (90, 90, 170, 160, 150, 130),
             "range": 3.6,
             "color": (255, 200, 60),
+            "freeze": 50,
+            "name": "RODÍZIO EXPLOSIVO",
+            "cutin": {"frame": 1, "box": (105, 150, 120, 115)},
             "fx": {"sheet_path": "assets/images/Sprites/igor_super_fx.png", "size": (381, 311),
                    "ground": 306, "origin": (24, -6), "frame_ticks": 5},
         },
@@ -204,7 +226,7 @@ CHARACTERS = [
         "data": [250, 1.5, [120, 70]],
         "height": 1.006,
         "anim_steps": [4, 6, 5, 4, 5, 4, 5],
-        "stats": {"max_health": 100, "speed": 9, "jump_vel": -31, "dmg_mult": 1.05, "stamina": 120},
+        "stats": {"max_health": 100, "speed": 8, "jump_vel": -31, "dmg_mult": 1.12, "stamina": 120},
         "tagline": "Forte e ágil",
         "super": {
             "sheet_path": "assets/images/Sprites/macedo_super.png",
@@ -212,8 +234,11 @@ CHARACTERS = [
             "frame_ms": (90, 90, 210, 170, 150, 120, 130),
             "range": 2.0,
             "color": (90, 170, 255),
+            "freeze": 50,
+            "name": "UPPERCUT REI CASTOR",
+            "cutin": {"frame": 2, "box": (185, 275, 95, 95)},
             "impact": (70, 280),      # punho do uppercut, lá em cima
-            "launch": {"frame": 2, "rise": 150, "gap": 125, "damage": 6},
+            "launch": {"frame": 2, "rise": 150, "gap": 125, "damage": 30},
         },
     },
     {
@@ -226,7 +251,7 @@ CHARACTERS = [
         "data": [250, 1.5, [120, 70]],
         "height": 0.972,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
-        "stats": {"max_health": 90, "speed": 6, "jump_vel": -25, "dmg_mult": 1.25, "stamina": 100},
+        "stats": {"max_health": 95, "speed": 6, "jump_vel": -25, "dmg_mult": 1.25, "stamina": 100},
         "tagline": "Muito forte, mas lento",
         "super": {
             "sheet_path": "assets/images/Sprites/manko_super.png",
@@ -234,6 +259,9 @@ CHARACTERS = [
             "frame_ms": (90, 90, 170, 160, 140, 130, 130),
             "range": 2.6,
             "color": (235, 60, 70),
+            "freeze": 50,
+            "name": "MULETADA SÍSMICA",
+            "cutin": {"frame": 2, "box": (205, 70, 125, 120)},
             "impact": (40, 15),       # muletada no chão, logo à frente
             "ground_wave": True,      # explosões correndo pelo chão até o alcance
         },
@@ -276,7 +304,7 @@ CHARACTERS = [
         "height": 1.0,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
         # rápida e o pulo mais alto do elenco, mas com pouca vida
-        "stats": {"max_health": 95, "speed": 9, "jump_vel": -32, "dmg_mult": 1.1, "stamina": 110},
+        "stats": {"max_health": 90, "speed": 9, "jump_vel": -32, "dmg_mult": 1.05, "stamina": 110},
         "tagline": "Nerd ágil do chapéu voador",
         "super": {
             # montado com: python tools/montar_super.py caio --pecas --projetil
@@ -303,11 +331,14 @@ CHARACTERS = [
         "id": "antonio",
         "name": "Antonio",
         "sheet_path": "assets/images/Sprites/antonio.png",
-        "sounds": {},             # ainda sem sons (atk1, atk2, super)
+        # atk1: primeira metade do som do SUPER do Macedo. atk2: "Blazing Fire" (Pixabay).
+        # Ainda sem som de SUPER.
+        "sounds": {"atk1": {"files": "macedoSuper.mp3", "keep": 0.5}, "atk2": "antonioAttack2.mp3"},
         "data": [250, 1.5, [120, 70]],
         "height": 1.0,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
-        "stats": {"max_health": 100, "speed": 8, "jump_vel": -29, "dmg_mult": 1.1, "stamina": 100},
+        "row_scale": {4: 1.2},   # golpe forte desenhado menor na sheet
+        "stats": {"max_health": 95, "speed": 9, "jump_vel": -29, "dmg_mult": 1.05, "stamina": 100},
         "tagline": "Tyler durden",
         "super": {
             # montado com: python tools/montar_super.py antonio
@@ -326,6 +357,47 @@ CHARACTERS = [
             "cutin": {"frame": 1, "box": (105, 30, 130, 125)},
             "beam": {"sheet_path": "assets/images/Sprites/antonio_super_fx.png", "size": (1662, 362),
                      "eyes": {2: (215, 103), 3: (118, 100)}, "height": 110, "hits": 6, "every": 5},
+        },
+    },
+    {
+        "id": "luba",
+        "name": "Luba",
+        "sheet_path": "assets/images/Sprites/luba.png",
+        # ainda sem sons
+        "data": [500, 0.72, [112, 63]],
+        "height": 1.0,
+        "anim_steps": [4, 4, 5, 4, 4, 4, 5],
+        "row_scale": {4: 1.33},  # golpe forte desenhado menor na sheet
+        "stats": {"max_health": 100, "speed": 8, "jump_vel": -30, "dmg_mult": 1.1, "stamina": 100},
+        "tagline": "Novo na briga",
+        "super": {
+            # montado com: python tools/montar_super_luba.py (originais em raw/luba_*_original.png
+            # e raw/luba_agua_original/). O Luba chama o pai pelo teletransporte, o pai solta um
+            # tubarão e a arena enche de água por um instante.
+            "sheet_path": "assets/images/Sprites/luba_super.png",
+            "rect": (-2, -2, 377, 364),
+            # Luba some, pai parado, prepara, empurra, redemoinho, jato, tubarão nadando,
+            # mordidas, guarda (água baixando), guarda (teletransporte de volta), Luba
+            "frame_ms": (230, 250, 190, 160, 260, 190, 270, 430, 300, 170, 300),
+            "impact_frame": 7,
+            "range": 12.0,            # a água enche a arena: pega o oponente em qualquer lugar
+            "damage": 28,
+            "color": (40, 170, 255),
+            "freeze": 56,
+            "name": "SÓ DEPENDE DE LUBA",
+            "cutin": {"sheet": "assets/images/Sprites/luba.png", "box": (205, 40, 115, 110)},
+            "shadow": (181, 180, 182, 214, 216, 220, 216, 216, 214, 214, 181),
+            "flood": {
+                "hits": 5, "every": 5,
+                "teleport": {"sheet_path": "assets/images/Sprites/luba_super_fx.png", "size": (252, 444),
+                             "base": 407, "center": (181, 354), "swap": (1, 10)},
+                "water_fx": {"sheet_path": "assets/images/Sprites/luba_tubarao_fx.png", "size": (196, 160),
+                             "spots": ((271, 76), (306, 47), (301, 87), (282, 68)), "vortex": (40, 56)},
+                # linha da superfície em cada onda; embaixo, a onda some em "fade" px sobre a textura
+                "waves": "assets/images/Sprites/lubaAgua", "surface": {1: 318, 2: 189, 4: 148, 5: 318},
+                "fade": 90,
+                "timeline": {"vortex": 4, "splash": 5, "shark": 6, "bite": 7, "drain": 8},
+            },
         },
     },
 ]
@@ -372,9 +444,10 @@ def _slice_sheet(char):
     animations = []
     for row, steps in enumerate(char["anim_steps"]):
         frames = []
+        side = round(scaled_size * char.get("row_scale", {}).get(row, 1.0))
         for col in range(steps):
             frame = sheet.subsurface(col * size, row * size, size, size)
-            frames.append(pygame.transform.scale(frame, (scaled_size, scaled_size)))
+            frames.append(pygame.transform.scale(frame, (side, side)))
         animations.append(frames)
 
     # linha 7: SUPER (sprite próprio ou o golpe forte dourado)
@@ -409,6 +482,26 @@ def get_super_fx(char_id):
         fx = sup.get("fx") or sup.get("boomerang") or sup.get("beam")
         _fx_cache[char_id] = _strip(fx["sheet_path"], *fx["size"]) if fx else None
     return _fx_cache[char_id]
+
+
+_flood_cache = {}
+
+
+def get_flood_art(char_id):
+    """Desenhos do SUPER da enchente (teletransporte, água das mãos, ondas), olhando para a
+    direita, ou None. waves: {1, 2, 4, 5: onda}, texture: o "tudo água" (sem transparência)."""
+    if char_id not in _flood_cache:
+        flood = CHARACTERS_BY_ID[char_id].get("super", {}).get("flood")
+        art = None
+        if flood:
+            tele, water, folder = flood["teleport"], flood["water_fx"], flood["waves"]
+            art = {"teleport": _strip(tele["sheet_path"], *tele["size"]),
+                   "water": _strip(water["sheet_path"], *water["size"]),
+                   "waves": {n: pygame.image.load(os.path.join(folder, f"frame{n}.png")).convert_alpha()
+                             for n in (1, 2, 4, 5)},
+                   "texture": pygame.image.load(os.path.join(folder, "frame3.png")).convert()}
+        _flood_cache[char_id] = art
+    return _flood_cache[char_id]
 
 
 _scaled_cache = {}
@@ -456,7 +549,8 @@ def get_sounds(char_id):
             spec = spec if isinstance(spec, dict) else {"files": spec}
             names = [spec["files"]] if isinstance(spec["files"], str) else spec["files"]
             loaded[name] = audio.load([os.path.join(SOUND_DIR, n) for n in names], audio.LEVELS[name],
-                                      starts=spec.get("starts"), delay=spec.get("delay", 0.0))
+                                      starts=spec.get("starts"), delay=spec.get("delay", 0.0),
+                                      keep=spec.get("keep", 1.0))
         _sound_cache[char_id] = {name: sound for name, sound in loaded.items() if sound is not None}
     return _sound_cache[char_id]
 
@@ -466,6 +560,7 @@ def preload_characters():
     for char in CHARACTERS:
         get_frames(char["id"])
         get_super_fx(char["id"])
+        get_flood_art(char["id"])
         get_sounds(char["id"])
 
 
@@ -603,7 +698,8 @@ class Fighter():
         self.sonic = (self.super_data or {}).get("sonic")
         self.boomerang = (self.super_data or {}).get("boomerang")
         self.beam = (self.super_data or {}).get("beam")
-        self.rapid = self.sonic or self.beam   # SUPER de vários acertos seguidos
+        self.flood = (self.super_data or {}).get("flood")
+        self.rapid = self.sonic or self.beam or self.flood   # SUPER de vários acertos seguidos
         stats = character["stats"]
         self.max_health = stats["max_health"]
         self.speed = stats["speed"]
@@ -612,9 +708,11 @@ class Fighter():
         self.max_stamina = stats.get("stamina", 100)
         self.is_cpu = is_cpu
         self.cpu_diff = cpu_diff
+        self.alt_palette = alt_palette
         self.ai = _CpuMemory() if is_cpu else None
         self.flip = flip
         self.animation_list = get_frames(character["id"], alt_palette)
+        self.feet_y = self.animation_list[0][0].get_bounding_rect().bottom   # pé no frame parado
         # 0: idle, 1: run, 2: jump, 3: attack1, 4: attack2, 5: hit, 6: death, 7: super
         self.action = 0
         self.frame_index = 0
@@ -658,6 +756,7 @@ class Fighter():
         self.hat = None                # SUPER bumerangue: o chapéu em voo (Hat)
         self.hat_caught_at = (0, 0)    # onde o chapéu chegou na mão (o main solta faíscas ali)
         self.hitstun = 0               # frames preso na animação de dano (esperando a volta do chapéu)
+        self.paralyzed = 0             # frames parado no tempo (SUPER da enchente de alguém)
         self.arena_width = 1000        # largura da tela (vem do move; a IA usa na previsão do chapéu)
         self.tremor = 0                # frames vibrando (sprite treme no lugar)
         self.tremor_amp = 0
@@ -728,8 +827,28 @@ class Fighter():
         return dodging or super_startup
 
     def visual_center_x(self):
-        """Centro do desenho (a sombra usa), igual para frames normais e do SUPER."""
+        """Centro do desenho (a sombra usa), igual para frames normais e do SUPER; com "shadow",
+        o meio entre os pés do frame atual do SUPER."""
+        shadow = (self.super_data or {}).get("shadow")
+        if self.action == 7 and shadow and self.frame_index < len(shadow):
+            return self.super_point(shadow[self.frame_index], 0)[0]
         return self.rect.x - self.offset[0] + self.frame_size // 2
+
+    def super_start_ms(self, index):
+        """Tempo de jogo (ms) do começo do SUPER até o começo do frame index."""
+        return sum(self.frame_ms(7, i) for i in range(index))
+
+    def super_elapsed_ms(self):
+        """Tempo de jogo (ms) desde o começo do SUPER, ou None fora dele."""
+        if self.action != 7 or not self.attacking:
+            return None
+        return self.super_start_ms(self.frame_index) + self.anim_ms
+
+    def frames_to_end(self):
+        """Frames de jogo até o fim da animação atual."""
+        frames = len(self.animation_list[self.action])
+        ms = sum(self.frame_ms(self.action, i) for i in range(self.frame_index, frames)) - self.anim_ms
+        return max(0, round(ms / FRAME_MS))
 
     def super_point(self, px, py):
         """Onde o pixel (px, py) de um frame do SUPER aparece na tela agora (espelhado se virado)."""
@@ -777,7 +896,7 @@ class Fighter():
         return (self.rect.x, self.rect.y, self.health, self.action, self.frame_index, round(self.anim_ms),
                 self.vel_y, round(self.knockback * 100), round(self.stamina * 100), self.super_meter,
                 self.attack_cooldown, self.parry_timer, self.dash_timer, self.stun_timer, self.hitstun,
-                self.attacking, self.hit, self.jumping, self.juggled, self.flip,
+                self.paralyzed, self.attacking, self.hit, self.jumping, self.juggled, self.flip,
                 None if hat is None else (round(hat.x), round(hat.y), hat.state))
 
     def spend_stamina(self, amount):
@@ -791,13 +910,17 @@ class Fighter():
     def move(self, screen_width, screen_height, target, can_act=True, held=None):
         """Controles + física de um frame. Retorna um HitEvent se um golpe encostou no oponente.
         held: botões deste frame (dict de BUTTONS) vindos de fora (rede); None = ler o teclado."""
+        self.arena_width = screen_width
+        if self.paralyzed > 0:
+            # parado no tempo pelo SUPER da enchente: nada anda (nem cai, nem o golpe, nem o chapéu)
+            self.running = False
+            return None
         dx = 0
         dy = 0
         self.running = False
         self.tick += 1
         on_ground = not self.jumping
         hit_event = None
-        self.arena_width = screen_width
         if self.parry_timer > 0:
             self.parry_timer -= 1
         if self.parry_cooldown > 0:
@@ -840,6 +963,8 @@ class Fighter():
                 # ATAQUES
                 if inputs["super"] and on_ground and self.super_ready():
                     self.start_attack(SUPER)
+                    if self.flood and target.alive:  # o oponente para no tempo até a água chegar
+                        target.get_paralyzed(self.frames_to_impact() + PARALYZE_MARGIN)
                 elif inputs["atk1"]:
                     self.start_attack(1)
                 elif inputs["atk2"]:
@@ -860,7 +985,8 @@ class Fighter():
                     if self.rapid:  # começa a rajada: este é o 1º acerto, os outros vêm depois
                         self.multi_left = self.rapid["hits"] - 1
                         self.multi_clock = self.rapid["every"]
-                        self.tremor, self.tremor_amp = TREMOR_SELF, TREMOR_SELF_AMP
+                        if not self.flood:  # quem solta a rajada/o raio treme junto
+                            self.tremor, self.tremor_amp = TREMOR_SELF, TREMOR_SELF_AMP
                 if self.attack_type == SUPER and self.boomerang:
                     self.hat = self._new_hat()  # o chapéu sai da mão; quem acerta é ele
                 else:
@@ -1193,13 +1319,18 @@ class Fighter():
     def _attack_box(self, target):
         """Hitbox do golpe atual. Retorna (direção, ponto de contato) se pegou o oponente, senão None."""
         reach = self.attack_reach(self.attack_type)
+        top, height = self.rect.y, self.rect.height
+        if self.attack_type == SUPER and self.flood:  # a água enche a arena: pega lá no alto também
+            top, height = self.rect.bottom - 1000, 1000
         if self.flip:  # virado para a esquerda
-            attack_rect = pygame.Rect(self.rect.centerx - reach, self.rect.y, reach, self.rect.height)
+            attack_rect = pygame.Rect(self.rect.centerx - reach, top, reach, height)
         else:
-            attack_rect = pygame.Rect(self.rect.centerx, self.rect.y, reach, self.rect.height)
+            attack_rect = pygame.Rect(self.rect.centerx, top, reach, height)
         self.attack_rect = attack_rect
         self.attack_rect_timer = 8
-        if not (target.alive and attack_rect.colliderect(target.rect)) or target.invulnerable():
+        if not (target.alive and attack_rect.colliderect(target.rect)):
+            return None
+        if target.invulnerable() and not target.paralyzed:  # paralisado não escapa (nem no dash)
             return None
         self.attack_landed = True
         direction = 1 if target.rect.centerx > self.rect.centerx else -1
@@ -1249,6 +1380,8 @@ class Fighter():
             target.vel_y = SONIC_FINAL_POP
             target.jumping = True
             target.juggled = True  # segura a animação de dano até cair (e levanta poeira)
+            if self.flood:  # enchente: só levanta depois que quem soltou voltar à base
+                target.hitstun = max(target.hitstun, self.frames_to_end() + FLOOD_RECOVER_EXTRA)
         self.gain_super(SUPER_GAIN_HIT[self.attack_type])
         color = self.super_color if self.attack_type == SUPER else None
         return HitEvent(kind, self.attack_type, contact, direction, not target.alive, color)
@@ -1413,6 +1546,13 @@ class Fighter():
             self.ai.parry_in = -1
             self._ai_set_plan("punish", 30)
 
+    def get_paralyzed(self, frames):
+        """SUPER da enchente de alguém: parado no tempo por `frames` (ou até levar o golpe).
+        A janela de parry e o dash acabam: paralisado não defende nem escapa."""
+        self.paralyzed = frames
+        self.parry_timer = 0
+        self.dash_timer = 0
+
     def get_stunned(self):
         self.attacking = False
         self.hit = True
@@ -1428,6 +1568,7 @@ class Fighter():
         self.knockback = direction * knockback
         self.attacking = False  # levar golpe interrompe o seu ataque
         self.hit = True
+        self.paralyzed = 0      # o golpe tira da paralisia
         self.super_air = False
         self.dash_timer = 0
         self.parry_timer = 0
@@ -1446,6 +1587,9 @@ class Fighter():
 
     # ---------------- ANIMAÇÃO ----------------
     def update(self):
+        if self.paralyzed > 0:  # parado no tempo: nem a animação nem os contadores andam
+            self.paralyzed -= 1
+            return
         if not self.alive:
             self.update_action(6)  # death
         elif self.hit:
@@ -1534,7 +1678,13 @@ class Fighter():
             surface.blit(ghost, (round(x) + ox, round(y) + oy))
 
         img = pygame.transform.flip(sized_frame(self.image, self.height_factor), self.flip, False)  # cópia
-        if self.flash_timer > 0:
+        if self.paralyzed > 0:
+            # parado no tempo: perde a cor, fica azulado e com um brilho frio pulsando
+            pulse = 0.5 + 0.5 * math.sin(pygame.time.get_ticks() / 85)
+            img.fill((115, 150, 220), special_flags=pygame.BLEND_RGB_MULT)
+            img.fill((int(12 + 12 * pulse), int(38 + 24 * pulse), int(75 + 45 * pulse)),
+                     special_flags=pygame.BLEND_RGB_ADD)
+        elif self.flash_timer > 0:
             img.fill((150, 150, 150), special_flags=pygame.BLEND_RGB_ADD)    # clarão branco
         elif self.parry_flash > 0:
             img.fill((90, 140, 255), special_flags=pygame.BLEND_RGB_ADD)     # parry certo
@@ -1546,6 +1696,11 @@ class Fighter():
 
         x = self.rect.x - self.offset[0]
         y = self.rect.y - self.offset[1]
+        extra = self.image.get_width() - self.frame_size
+        if extra > 0 and self.action != 7:
+            # linha ampliada (row_scale): cresce a partir do meio do pé, que fica no lugar
+            x -= extra / 2
+            y -= extra * self.feet_y / self.frame_size
         if self.action == 7 and self.super_data:
             # frame do SUPER é maior que o normal; rect diz onde ele fica em relação ao frame normal
             left, top, width, _ = self.super_data["rect"]
