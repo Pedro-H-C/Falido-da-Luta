@@ -185,7 +185,8 @@ HitEvent = namedtuple("HitEvent", "kind attack_type pos direction ko color", def
 #             Em vez do nome do arquivo pode ser {"files": ..., "delay": s, "starts": (...)}:
 #             delay = segundos de espera antes de tocar; files com várias partes + starts = em que
 #             segundo cada parte entra (o som acaba junto com a última parte); "keep": fração do
-#             arquivo que toca, do começo (0.5 = primeira metade).
+#             arquivo que toca, do começo (0.5 = primeira metade); "with_super": True no som do
+#             SUPER = ele some quando o golpe acaba (mesmo interrompido), em vez de tocar até o fim.
 # row_scale -> {linha da sheet: fator}: amplia os frames de uma linha desenhada menor que as
 #             outras (o pé fica no lugar). Só o desenho; a hitbox não muda.
 # height    -> tamanho na tela em relação à sprite (1.0 = como está na sheet). O pé continua no chão
@@ -221,8 +222,9 @@ CHARACTERS = [
         "id": "macedo",
         "name": "Macedo",
         "sheet_path": "assets/images/Sprites/macedo.png",
+        # SUPER: feito pelo Felipe Macedo; começa 0,8 s depois e acaba junto com o golpe
         "sounds": {"atk1": "macedoAttack1.mp3", "atk2": "macedoAttack2.mp3",
-                   "super": "macedoSuper.mp3"},
+                   "super": {"files": "macedoSuper.mp3", "delay": 0.8, "with_super": True}},
         "data": [250, 1.5, [120, 70]],
         "height": 1.006,
         "anim_steps": [4, 6, 5, 4, 5, 4, 5],
@@ -333,7 +335,7 @@ CHARACTERS = [
         "sheet_path": "assets/images/Sprites/antonio.png",
         # atk1: primeira metade do som do SUPER do Macedo. atk2: "Blazing Fire" (Pixabay).
         # Ainda sem som de SUPER.
-        "sounds": {"atk1": {"files": "macedoSuper.mp3", "keep": 0.5}, "atk2": "antonioAttack2.mp3"},
+        "sounds": {"atk1": "antonioAttack1.mp3", "atk2": "antonioAttack2.mp3"},
         "data": [250, 1.5, [120, 70]],
         "height": 1.0,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],
@@ -363,7 +365,7 @@ CHARACTERS = [
         "id": "luba",
         "name": "Luba",
         "sheet_path": "assets/images/Sprites/luba.png",
-        # ainda sem sons
+        "sounds": {"atk1": "lubaAttack1.mp3"},   # ainda sem som de golpe forte e de SUPER
         "data": [500, 0.72, [112, 63]],
         "height": 1.0,
         "anim_steps": [4, 4, 5, 4, 4, 4, 5],

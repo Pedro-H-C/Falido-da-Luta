@@ -1808,6 +1808,7 @@ class Match:
         )
         for f, meter in zip(self.fighters, self.super_carry):
             f.super_meter = meter
+        self.in_super = [False, False]   # lutador estava no SUPER no frame anterior (som que acaba junto)
         self.intro_count = 3
         audio.play(f"count{self.intro_count}")   # locutor: "3"
         self.last_count_update = self.clock_ms()
@@ -1880,6 +1881,13 @@ class Match:
                 self.effects.on_hat_fly(attacker)
         f1.update()
         f2.update()
+        for side, f in enumerate(self.fighters):   # SUPER acabou: o som dele acaba junto (se marcado)
+            in_super = f.action == 7 and f.attacking
+            if self.in_super[side] and not in_super:
+                spec = f.character.get("sounds", {}).get("super")
+                if isinstance(spec, dict) and spec.get("with_super"):
+                    audio.end_fighter_super(side)
+            self.in_super[side] = in_super
 
         if self.finished:
             return

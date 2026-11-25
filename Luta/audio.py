@@ -23,6 +23,7 @@ MIXER_CHANNELS = 16
 # o som dele (que é bem mais longo que o golpe).
 ATTACK_CHANNELS = (0, 1)
 SUPER_CHANNELS = (2, 3)
+SUPER_END_FADE_MS = 180      # som do SUPER que acaba junto com o golpe some nesse tempo
 FIGHTER_CHANNELS = ATTACK_CHANNELS + SUPER_CHANNELS
 
 # ---------------- ALTURA DOS SONS ----------------
@@ -336,6 +337,12 @@ def resume_fighters():
     if available():
         for index in FIGHTER_CHANNELS:
             pygame.mixer.Channel(index).unpause()
+
+
+def end_fighter_super(side, fade_ms=SUPER_END_FADE_MS):
+    """O SUPER do lutador (side 0 = P1, 1 = P2) acabou: o som dele some aos poucos."""
+    if available():
+        pygame.mixer.Channel(SUPER_CHANNELS[side]).fadeout(fade_ms)
 
 
 def stop_fighters():
